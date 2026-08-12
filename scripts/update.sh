@@ -1,9 +1,14 @@
 #!/bin/bash
 # =============================================================
 # update.sh
-# Update all components of the local LLM stack
-# Usage: ./scripts/update.sh [--all | --mlx | --docker | --colima]
-# With no arguments, updates everything.
+# Update the headless oMLX LLM server.
+#
+# Usage:
+#   ./scripts/update.sh              # update everything (default)
+#   ./scripts/update.sh --omlx       # update oMLX via Homebrew only
+#   ./scripts/update.sh --models     # re-download primary model only
+#
+# After oMLX updates, the brew service is restarted automatically.
 # =============================================================
 
 set -e
@@ -19,174 +24,89 @@ log_success() { echo -e "${GREEN}[OK]${NC}    $1"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC}  $1"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
-export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-# Derive paths dynamically — works from any clone location
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_DIR=~/docker/local-llm
+# Config
+MODEL_DIR="/opt/models"
+PRIMARY_MODEL_REPO="mlx-community/Qwen3.6-27B-Heretic2-Uncensored-Finetune-Thinking-OptiQ-4bit"
+PRIMARY_MODEL_DIR="${MODEL_DIR}/qwen3.6-27b-heretic2-uncensored"
+OMLX_PORT="8000"
 
-UPDATE_MLX=false
-UPDATE_DOCKER=false
-UPDATE_COLIMA=false
-
-# Parse arguments — default to all if none provided
+# Parse args — default to all if none provided
+UPDATE_OMLX=false
+UPDATE_MODELS=false
 if [ $# -eq 0 ]; then
-  UPDATE_MLX=true
-  UPDATE_DOCKER=true
-  UPDATE_COLIMA=true
+  UPDATE_OMLX=true
+  UPDATE_MODELS=true
 else
   for arg in "$@"; do
-    case $arg in
-      --all)    UPDATE_MLX=true; UPDATE_DOCKER=true; UPDATE_COLIMA=true ;;
-      --mlx)    UPDATE_MLX=true ;;
-      --docker) UPDATE_DOCKER=true ;;
-      --colima) UPDATE_COLIMA=true ;;
-      *) log_error "Unknown argument: $arg. Use --all, --mlx, --docker, or --colima" ;;
+    case "$arg" in
+      --all)    UPDATE_OMLX=true; UPDATE_MODELS=true ;;
+      --omlx)   UPDATE_OMLX=true ;;
+      --models) UPDATE_MODELS=true ;;
+      --help|-h)
+        echo "Usage: $0 [--all | --omlx | --models]"
+        exit 0
+        ;;
+      *) log_error "Unknown argument: $arg (use --all, --omlx, or --models)" ;;
     esac
   done
 fi
 
 echo ""
 echo "=============================================="
-echo "  Local LLM Stack — Update"
+echo "  Headless oMLX LLM Server — Update"
 echo "=============================================="
 echo ""
 
 # --------------------------------------------------------------
-# Update mlx-lm
+# Update oMLX via Homebrew
 # --------------------------------------------------------------
-if [ "$UPDATE_MLX" = true ]; then
-  echo "--- mlx-lm ---"
-  log_info "Upgrading mlx-lm via pipx..."
+if [ "$UPDATE_OMLX" = true ]; then
+  echo "--- oMLX ---"
+  log_info "Updating Homebrew formulae..."
+  brew update
 
-  pipx upgrade mlx-lm
+  log_info "Upgrading oMLX..."
+  brew upgrade omlx 2>/dev/null && log_success "oMLX upgraded" || log_success "oMLX already at latest version"
 
-  log_info "Reloading MLX LaunchAgents..."
-  for plist in com.mlx.fast.plist com.mlx.indepth.plist; do
-    launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/$plist" 2>/dev/null || true
-    sleep 1
-    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$plist"
-    log_success "$plist reloaded"
-  done
+  log_info "Restarting oMLX brew service..."
+  brew services restart omlx
+  log_success "oMLX service restarted"
+
+  # Re-allowlist the interpreter after upgrade — the Python binary path
+  # changes on each omlx upgrade, so the old firewall rule no longer applies.
+  log_info "Re-allowlisting oMLX listener in macOS firewall..."
+  sleep 5  # let the service come up and bind the port
+  if pgrep -f "omlx serve" >/dev/null 2>&1; then
+    OMLX_PID=$(pgrep -f "omlx serve" | head -1)
+    OMLX_BIN=$(ps -p "$OMLX_PID" -o comm= 2>/dev/null || echo "")
+    if [ -n "$OMLX_BIN" ] && [ -x "$OMLX_BIN" ]; then
+      sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "$OMLX_BIN" 2>/dev/null || true
+      sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock "$OMLX_BIN" 2>/dev/null || true
+      log_success "Firewall rule refreshed for: ${OMLX_BIN}"
+    else
+      log_warn "Could not find oMLX listener binary to re-allowlist"
+      log_warn "Run manually: sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add \$(ps -p \$(pgrep -f 'omlx serve' | head -1) -o comm=)"
+    fi
+  else
+    log_warn "oMLX process not found after restart — firewall rule not refreshed"
+  fi
   echo ""
 fi
 
 # --------------------------------------------------------------
-# Sync models to Open WebUI after MLX update
+# Re-download primary model (catches upstream revisions)
 # --------------------------------------------------------------
-sync_openwebui_models() {
-  log_info "Syncing models to Open WebUI..."
-
-  FAST_MODEL=$(curl -s http://localhost:8080/v1/models | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null)
-  INDEPTH_MODEL=$(curl -s http://localhost:8081/v1/models | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null)
-
-  if [ -z "$FAST_MODEL" ] || [ -z "$INDEPTH_MODEL" ]; then
-    log_warn "Skipping Open WebUI model sync — MLX APIs not responding"
-    return
-  fi
-
-  docker exec open-webui python3 - "$FAST_MODEL" "$INDEPTH_MODEL" << 'PYEOF'
-import sys, sqlite3, json, time
-
-fast_model = sys.argv[1]
-indepth_model = sys.argv[2]
-
-conn = sqlite3.connect('/app/backend/data/webui.db')
-cur = conn.cursor()
-now = int(time.time())
-
-cur.execute('SELECT id FROM "user" LIMIT 1')
-user_id = cur.fetchone()[0]
-
-meta_fast = json.dumps({
-    "profile_image_url": "/static/favicon.png",
-    "capabilities": {
-        "file_context": True, "vision": True, "file_upload": True,
-        "web_search": True, "image_generation": True, "code_interpreter": True,
-        "terminal": True, "citations": True, "status_updates": True,
-        "memory": True, "builtin_tools": True
-    },
-    "tags": [],
-    "defaultFeatureIds": ["web_search", "image_generation", "code_interpreter"]
-})
-meta_indepth = json.dumps({
-    "profile_image_url": "/static/favicon.png",
-    "capabilities": {
-        "file_context": True, "vision": True, "file_upload": True,
-        "web_search": True, "image_generation": True, "code_interpreter": True,
-        "terminal": True, "citations": True, "status_updates": True,
-        "memory": True, "builtin_tools": True
-    },
-    "tags": [],
-    "defaultFeatureIds": ["web_search", "image_generation", "code_interpreter"],
-    "toolIds": ["web_search_and_crawl", "sub_agent"]
-})
-
-cur.execute('DELETE FROM model')
-cur.execute('INSERT INTO model (id, user_id, name, meta, params, created_at, updated_at, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    (fast_model, user_id, 'Fast', meta_fast, '{}', now, now, 1))
-cur.execute('INSERT INTO model (id, user_id, name, meta, params, created_at, updated_at, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    (indepth_model, user_id, 'In-Depth', meta_indepth, '{}', now, now, 1))
-
-cur.execute('SELECT value FROM config WHERE key=?', ('openai.api_configs',))
-configs = json.loads(cur.fetchone()[0])
-configs['0']['model_ids'] = [fast_model]
-configs['1']['model_ids'] = [indepth_model]
-cur.execute('UPDATE config SET value=? WHERE key=?', (json.dumps(configs), 'openai.api_configs'))
-
-conn.commit()
-print(f'OK: models synced: {fast_model}, {indepth_model}')
-PYEOF
-
-  if [ $? -eq 0 ]; then
-    log_success "Open WebUI models synced"
+if [ "$UPDATE_MODELS" = true ]; then
+  echo "--- Models ---"
+  if ! command -v hf >/dev/null 2>&1; then
+    log_warn "huggingface-cli not found — skipping model update"
   else
-    log_warn "Open WebUI model sync failed"
-  fi
-}
-
-if [ "$UPDATE_MLX" = true ]; then
-  sync_openwebui_models
-fi
-
-# --------------------------------------------------------------
-# Update Docker images (Open WebUI + ChromaDB)
-# --------------------------------------------------------------
-if [ "$UPDATE_DOCKER" = true ]; then
-  echo "--- Docker Compose stack ---"
-  log_info "Pulling latest images..."
-
-  cd "$COMPOSE_DIR"
-  docker compose pull
-  docker compose up -d
-  log_success "Open WebUI and ChromaDB updated and restarted"
-
-  sleep 10
-  sync_openwebui_models
-  echo ""
-fi
-
-# --------------------------------------------------------------
-# Update Colima
-# --------------------------------------------------------------
-if [ "$UPDATE_COLIMA" = true ]; then
-  echo "--- Colima ---"
-  log_info "Checking for Colima updates..."
-
-  BEFORE=$(brew info colima | grep "colima " | awk '{print $2}')
-  brew upgrade colima 2>/dev/null || log_warn "Colima already at latest version"
-  AFTER=$(brew info colima | grep "colima " | awk '{print $2}')
-
-  if [ "$BEFORE" != "$AFTER" ]; then
-    log_info "Updated Colima $BEFORE → $AFTER, restarting..."
-    launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.colima.server.plist 2>/dev/null || true
-    colima stop 2>/dev/null || true
-    sleep 3
-    colima start --cpu 4 --memory 8 --disk 60
-    launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.colima.server.plist
-    log_success "Colima restarted"
-  else
-    log_success "Colima already at latest version ($AFTER)"
+    log_info "Re-downloading primary model (idempotent — only fetches changes)..."
+    log_info "  ${PRIMARY_MODEL_REPO} → ${PRIMARY_MODEL_DIR}"
+    hf download "$PRIMARY_MODEL_REPO" --local-dir "$PRIMARY_MODEL_DIR"
+    log_success "Primary model is up to date"
   fi
   echo ""
 fi
@@ -198,37 +118,19 @@ echo "=============================================="
 echo "  Post-update Health Check"
 echo "=============================================="
 
-log_info "Waiting 10 seconds for services to settle..."
+log_info "Waiting 10 seconds for oMLX to settle..."
 sleep 10
 
-if colima status 2>/dev/null | grep -q "colima is running"; then
-  log_success "Colima running"
+if brew services info omlx 2>/dev/null | grep -qi "running"; then
+  log_success "oMLX brew service is running"
 else
-  log_warn "Colima NOT running"
+  log_warn "oMLX brew service not reporting as running"
 fi
 
-if curl -sf http://localhost:8080/v1/models >/dev/null; then
-  log_success "MLX fast model API responding"
+if curl -sf --max-time 10 "http://localhost:${OMLX_PORT}/v1/models" >/dev/null 2>&1; then
+  log_success "oMLX API responding on :${OMLX_PORT}"
 else
-  log_warn "MLX fast model API not responding"
-fi
-
-if curl -sf http://localhost:8081/v1/models >/dev/null; then
-  log_success "MLX indepth model API responding"
-else
-  log_warn "MLX indepth model API not responding"
-fi
-
-if curl -sf http://localhost:8000/api/v2/heartbeat >/dev/null; then
-  log_success "ChromaDB responding"
-else
-  log_warn "ChromaDB not responding"
-fi
-
-if curl -sf -o /dev/null http://localhost:3000; then
-  log_success "Open WebUI responding"
-else
-  log_warn "Open WebUI not responding"
+  log_warn "oMLX API not responding — model may still be loading"
 fi
 
 echo ""
