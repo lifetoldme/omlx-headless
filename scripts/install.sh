@@ -186,12 +186,12 @@ log_info "Configuring macOS firewall to allow LAN access to oMLX..."
 # oMLX runs under a brew-venv Python interpreter. Find the actual binary
 # that listens on :8000 and allowlist it.
 OMLX_BIN=""
-if pgrep -f "omlx serve" >/dev/null 2>&1; then
+if pgrep -f "omlx" >/dev/null 2>&1; then
   # Discover the actual listening binary via lsof
   OMLX_BIN=$(lsof -nP -iTCP:"$OMLX_PORT" -sTCP:LISTEN 2>/dev/null | tail -1 | awk '{print $1}')
   if [ -n "$OMLX_BIN" ]; then
     # Resolve the full path of the process binary
-    OMLX_PID=$(pgrep -f "omlx serve" | head -1)
+    OMLX_PID=$(pgrep -f "omlx" | head -1)
     OMLX_BIN=$(ps -p "$OMLX_PID" -o comm= 2>/dev/null || echo "")
   fi
 fi
