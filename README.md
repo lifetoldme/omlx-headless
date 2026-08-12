@@ -58,8 +58,8 @@ oMLX is installed via Homebrew (see [Deployment](#deployment) below) — no `pip
 ```bash
 mkdir -p ~/Developer
 cd ~/Developer
-git clone https://github.com/<you>/headless-mac-llm.git
-cd headless-mac-llm
+git clone https://github.com/<you>/omlx-headless.git
+cd omlx-headless
 chmod +x scripts/*.sh
 ```
 
@@ -94,9 +94,20 @@ In the admin panel:
 2. **Create two profiles** for the pinned model:
    - `qwen3.6-27b-heretic2` — chat template kwargs `{"enable_thinking": false}` (for Hermes tool-call)
    - `qwen3.6-27b-heretic2:thinking` — default kwargs (thinking ON, for general chat)
-3. Profiles are exposed as separate model IDs on `/v1/models` at zero extra RAM cost.
+3. **Expose both profiles as models** (toggle "Expose as model" on each) so they appear on `/v1/models`.
+4. **Disable API key auth** if you want unauthenticated LAN access (see [API key warning](#api-key-warning-on-first-connect) below).
 
 > **Why profiles?** Hermes tool-call needs thinking OFF (a thinking block can consume the token budget before a tool call is emitted). General chat benefits from thinking ON. Profiles let one loaded model serve both use cases without a second model in memory.
+
+#### API key warning on first connect
+
+The oMLX admin panel **generates and requires an API key on first connect** — clients calling `/v1/models` or `/v1/chat/completions` without it get `{"error":{"message":"API key required"}}`. If you want the unauthenticated trusted-home-LAN setup this repo documents, disable it after first connect:
+
+- In the admin panel: **Settings → Auth → skip API key verification** (toggle on), then clear the `api_key` field.
+- Or edit `~/.omlx/settings.json` directly: set `auth.skip_api_key_verification` to `true` and `auth.api_key` to `""`.
+- Then: `brew services restart omlx`
+
+If you prefer to keep the API key, point each client (HA, Open WebUI, Hermes) at the key instead. The endpoint contract in [AGENTS.md](AGENTS.md) assumes unauthenticated — update it if you keep the key.
 
 ### 4. Verify
 
@@ -418,7 +429,7 @@ If you're upgrading from the previous multi-service architecture (mlx_lm.server 
 ## Repository Structure
 
 ```
-headless-mac-llm/
+omlx-headless/
 ├── README.md
 ├── AGENTS.md           # SSH-ops playbook for AI agents and humans
 └── scripts/

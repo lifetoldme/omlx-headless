@@ -198,5 +198,5 @@ curl -s http://<MAC_STUDIO_IP>:8000/v1/models | python3 -m json.tool
 | oMLX settings | `~/.omlx/settings.json` |
 | oMLX logs | `~/.omlx/logs/server.log`, `$(brew --prefix)/var/log/omlx.log` |
 | oMLX cache (optional SSD) | `~/.omlx/cache/` (if `--paged-ssd-cache-dir` enabled) |
-| Repo | `~/Developer/headless-mac-llm/` (or wherever cloned) |
+| Repo | `~/Developer/omlx-headless/` (or wherever cloned) |
 | Scripts | `scripts/install.sh`, `scripts/uninstall.sh`, `scripts/status.sh`, `scripts/update.sh` |
