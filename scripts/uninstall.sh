@@ -95,27 +95,59 @@ fi
 
 # --------------------------------------------------------------
 # 2. Bootout old custom LaunchAgents (best-effort, ignore errors)
+#    Handle ALL com.mlx.* plists (fast, indepth, coding, reasoning, etc.)
+#    plus the old compose plist.
 # --------------------------------------------------------------
 echo "--- Old LaunchAgents ---"
 
-OLD_PLISTS=(
-  "com.mlx.fast.plist"
-  "com.mlx.indepth.plist"
-  "com.colima.server.plist"
-  "com.localllm.compose.plist"
-)
+# Kill any running mlx_lm.server processes first (gracefully)
+if pgrep -f "mlx_lm.server" >/dev/null 2>&1; then
+  log_info "Stopping running mlx_lm.server processes..."
+  pkill -f "mlx_lm.server" 2>/dev/null || true
+  sleep 2
+  log_success "mlx_lm.server processes stopped"
+fi
 
-for plist in "${OLD_PLISTS[@]}"; do
-  dest="$HOME/Library/LaunchAgents/$plist"
-  if [ -f "$dest" ]; then
-    log_info "Unloading $plist..."
-    launchctl bootout "gui/$(id -u)" "$dest" 2>/dev/null || true
-    rm -f "$dest"
-    log_success "Removed $plist"
-  else
-    log_info "$plist not present — skipping"
-  fi
+# Bootout and remove every com.mlx.* plist (glob — catches fast, indepth, coding, reasoning, etc.)
+for dest in "$HOME"/Library/LaunchAgents/com.mlx.*.plist; do
+  [ -f "$dest" ] || continue
+  plist=$(basename "$dest")
+  log_info "Unloading $plist..."
+  launchctl bootout "gui/$(id -u)" "$dest" 2>/dev/null || true
+  rm -f "$dest"
+  log_success "Removed $plist"
 done
+
+# Also remove the old compose plist if it exists
+COMPOSE_PLIST="$HOME/Library/LaunchAgents/com.localllm.compose.plist"
+if [ -f "$COMPOSE_PLIST" ]; then
+  log_info "Unloading com.localllm.compose.plist..."
+  launchctl bootout "gui/$(id -u)" "$COMPOSE_PLIST" 2>/dev/null || true
+  rm -f "$COMPOSE_PLIST"
+  log_success "Removed com.localllm.compose.plist"
+fi
+
+# Also the old custom colima plist (if the brew-managed one isn't handling it)
+OLD_COLIMA_PLIST="$HOME/Library/LaunchAgents/com.colima.server.plist"
+if [ -f "$OLD_COLIMA_PLIST" ]; then
+  log_info "Unloading com.colima.server.plist..."
+  launchctl bootout "gui/$(id -u)" "$OLD_COLIMA_PLIST" 2>/dev/null || true
+  rm -f "$OLD_COLIMA_PLIST"
+  log_success "Removed com.colima.server.plist"
+fi
+
+echo ""
+
+# --------------------------------------------------------------
+# 2b. Uninstall pipx mlx-lm (replaced by oMLX)
+# --------------------------------------------------------------
+echo "--- pipx mlx-lm ---"
+if command -v pipx >/dev/null 2>&1 && pipx list 2>/dev/null | grep -q "mlx-lm"; then
+  log_info "Uninstalling mlx-lm via pipx..."
+  pipx uninstall mlx-lm 2>/dev/null && log_success "mlx-lm removed from pipx" || log_warn "pipx uninstall failed (may need manual cleanup)"
+else
+  log_info "mlx-lm not installed via pipx — skipping"
+fi
 echo ""
 
 # --------------------------------------------------------------
@@ -144,6 +176,11 @@ echo ""
 # --------------------------------------------------------------
 echo "--- Colima ---"
 if command -v colima >/dev/null 2>&1; then
+  # Stop the brew-managed colima service if it's registered
+  if launchctl list 2>/dev/null | grep -q "homebrew.mxcl.colima"; then
+    log_info "Stopping brew-managed Colima service..."
+    brew services stop colima 2>/dev/null || true
+  fi
   if colima status 2>&1 | grep -q "colima is running"; then
     log_info "Stopping Colima..."
     colima stop 2>/dev/null || true
@@ -235,8 +272,9 @@ echo "=============================================="
 echo "  Uninstall complete"
 echo ""
 echo "  What was removed:"
-echo "    - Old custom LaunchAgents (com.mlx.*, com.colima.*, com.localllm.*)"
+echo "    - Old custom LaunchAgents (all com.mlx.*, com.colima.*, com.localllm.*)"
 echo "    - Docker Compose stack + volumes (Open WebUI, ChromaDB, SearXNG)"
+echo "    - pipx mlx-lm (replaced by oMLX)"
 [ "$UNINSTALL_OMLX" = true ] && echo "    - oMLX brew package and service"
 [ "$PURGE_MODELS" = true ] && echo "    - /opt/models/* (all downloaded weights)"
 echo ""
