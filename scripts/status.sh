@@ -66,11 +66,11 @@ echo ""
 # --------------------------------------------------------------
 echo -e "${BOLD}Processes${NC}"
 
-if pgrep -f "omlx serve" >/dev/null 2>&1; then
-  PID=$(pgrep -f "omlx serve" | tr '\n' ' ')
-  pass "omlx serve process running (PID $PID)"
+if pgrep -f "omlx" >/dev/null 2>&1; then
+  PID=$(pgrep -f "omlx" | tr '\n' ' ')
+  pass "omlx process running (PID $PID)"
 else
-  fail "omlx serve process not found"
+  fail "omlx process not found"
   info "If the brew service shows running but no process, check the log:"
   info "  tail -50 ~/.omlx/logs/server.log"
 fi

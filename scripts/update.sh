@@ -78,8 +78,8 @@ if [ "$UPDATE_OMLX" = true ]; then
   # changes on each omlx upgrade, so the old firewall rule no longer applies.
   log_info "Re-allowlisting oMLX listener in macOS firewall..."
   sleep 5  # let the service come up and bind the port
-  if pgrep -f "omlx serve" >/dev/null 2>&1; then
-    OMLX_PID=$(pgrep -f "omlx serve" | head -1)
+  if pgrep -f "omlx" >/dev/null 2>&1; then
+    OMLX_PID=$(pgrep -f "omlx" | head -1)
     OMLX_BIN=$(ps -p "$OMLX_PID" -o comm= 2>/dev/null || echo "")
     if [ -n "$OMLX_BIN" ] && [ -x "$OMLX_BIN" ]; then
       sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "$OMLX_BIN" 2>/dev/null || true
