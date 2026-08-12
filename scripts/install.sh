@@ -1,7 +1,13 @@
 #!/bin/bash
 # =============================================================
 # install.sh
-# One-shot setup script for the local LLM stack on Apple Silicon
+# One-shot setup for the headless oMLX LLM server on Apple Silicon.
+#
+# This Mac Studio is HEADLESS and managed only over SSH. No GUI apps,
+# no Docker, no Colima, no Open WebUI, no SearXNG. Just oMLX serving
+# one model on :8000 to Home Assistant, Open WebUI (on unRAID), and
+# Hermes Agent — all on other LAN hosts.
+#
 # Usage: ./scripts/install.sh
 # =============================================================
 
@@ -14,17 +20,22 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_DIR=~/docker/local-llm
-
 log_info()    { echo -e "${BLUE}[INFO]${NC}  $1"; }
 log_success() { echo -e "${GREEN}[OK]${NC}    $1"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC}  $1"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
+# Config
+MODEL_DIR="/opt/models"
+PRIMARY_MODEL_REPO="mlx-community/Qwen3.6-27B-Heretic2-Uncensored-Finetune-Thinking-OptiQ-4bit"
+PRIMARY_MODEL_DIR="${MODEL_DIR}/qwen3.6-27b-heretic2-uncensored"
+FALLBACK_MODEL_REPO="mlx-community/Qwen3.6-27B-OptiQ-4bit"
+FALLBACK_MODEL_DIR="${MODEL_DIR}/qwen3.6-27b-optiq"
+OMLX_PORT="8000"
+
 echo ""
 echo "=============================================="
-echo "  Local LLM Stack — Install"
+echo "  Headless oMLX LLM Server — Install"
 echo "=============================================="
 echo ""
 
@@ -35,257 +46,174 @@ log_info "Checking prerequisites..."
 
 command -v brew >/dev/null 2>&1 || log_error "Homebrew is not installed. Install it first: https://brew.sh"
 
-for pkg in colima docker docker-compose hf pipx; do
-  if ! brew list "$pkg" &>/dev/null; then
-    log_info "Installing $pkg via Homebrew..."
-    brew install "$pkg"
-  else
-    log_success "$pkg already installed"
-  fi
-done
-
-log_info "Installing mlx-lm via pipx..."
-# pipx manages its own isolated venv — avoids PEP 668 externally-managed-environment errors
-if pipx list | grep -q "mlx-lm"; then
-  pipx upgrade mlx-lm
-  log_success "mlx-lm upgraded"
+if ! command -v hf >/dev/null 2>&1; then
+  log_info "Installing huggingface-cli via Homebrew..."
+  brew install hf
 else
-  pipx install mlx-lm
-  pipx ensurepath
-  log_success "mlx-lm installed"
+  log_success "huggingface-cli already installed"
 fi
 
-# Verify binary is on PATH
-if ! command -v mlx_lm.server >/dev/null 2>&1; then
-  log_warn "mlx_lm.server not found on PATH. You may need to run: pipx ensurepath && source ~/.zshrc"
-  log_warn "Then re-run this script, or manually update the LaunchAgent plists with the correct path."
+# --------------------------------------------------------------
+# 2. Install oMLX via Homebrew
+# --------------------------------------------------------------
+log_info "Installing oMLX via Homebrew..."
+
+if ! brew tap | grep -q "jundot/omlx"; then
+  brew tap jundot/omlx https://github.com/jundot/omlx
+fi
+
+if brew list omlx &>/dev/null; then
+  log_info "oMLX already installed, upgrading..."
+  brew upgrade omlx 2>/dev/null || log_success "oMLX already at latest version"
 else
-  log_success "mlx_lm.server found at: $(which mlx_lm.server)"
+  brew install omlx
+  log_success "oMLX installed"
 fi
 
-# NOTE: mlx_lm.server path substitution happens in Section 5 against the
-# INSTALLED plists in ~/Library/LaunchAgents/, so the repo templates stay
-# generic and portable across users/machines.
+# Verify the omlx CLI is on PATH
+if ! command -v omlx >/dev/null 2>&1; then
+  log_error "omlx CLI not found on PATH after install. Try: brew link omlx"
+fi
+log_success "omlx CLI found at: $(command -v omlx)"
 
 # --------------------------------------------------------------
-# 2. Create required directories
+# 3. Prepare model directory
 # --------------------------------------------------------------
-log_info "Creating required directories..."
+log_info "Preparing model directory at ${MODEL_DIR}..."
 
-sudo mkdir -p /var/log/mlx
-sudo chown "$(whoami)" /var/log/mlx
-log_success "/var/log/mlx created"
-
-mkdir -p ~/Library/LaunchAgents
-log_success "~/Library/LaunchAgents exists"
-
-mkdir -p "$COMPOSE_DIR"
-log_success "$COMPOSE_DIR created"
-
-# --------------------------------------------------------------
-# 3. Configure Docker plugin path
-# --------------------------------------------------------------
-log_info "Configuring Docker CLI plugin path..."
-
-mkdir -p ~/.docker
-DOCKER_CONFIG=~/.docker/config.json
-
-if [ ! -f "$DOCKER_CONFIG" ]; then
-  cat > "$DOCKER_CONFIG" << 'JSONEOF'
-{
-  "cliPluginsExtraDirs": [
-    "/opt/homebrew/lib/docker/cli-plugins"
-  ]
-}
-JSONEOF
-  log_success "Created ~/.docker/config.json"
+if [ ! -d "$MODEL_DIR" ]; then
+  sudo mkdir -p "$MODEL_DIR"
+  sudo chown "$(whoami)" "$MODEL_DIR"
+  log_success "Created ${MODEL_DIR}"
 else
-  # Check if the plugin dir is already present
-  if ! grep -q "cliPluginsExtraDirs" "$DOCKER_CONFIG"; then
-    log_warn "~/.docker/config.json exists but is missing cliPluginsExtraDirs. Add it manually:"
-    echo '  "cliPluginsExtraDirs": ["/opt/homebrew/lib/docker/cli-plugins"]'
-  else
-    log_success "~/.docker/config.json already configured"
-  fi
+  log_success "${MODEL_DIR} already exists"
 fi
 
 # --------------------------------------------------------------
-# 4. Configure DOCKER_HOST in shell profile
+# 4. Download primary model (Heretic2 uncensored + OptiQ 4-bit)
 # --------------------------------------------------------------
-log_info "Configuring DOCKER_HOST in ~/.zshrc..."
+log_info "Checking primary model: ${PRIMARY_MODEL_REPO}"
 
-DOCKER_HOST_LINE='export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"'
-if ! grep -qF "$DOCKER_HOST_LINE" ~/.zshrc 2>/dev/null; then
-  echo "" >> ~/.zshrc
-  echo "# Added by local-llm install.sh" >> ~/.zshrc
-  echo "$DOCKER_HOST_LINE" >> ~/.zshrc
-  log_success "DOCKER_HOST added to ~/.zshrc"
+if [ -d "$PRIMARY_MODEL_DIR" ] && [ "$(ls -A "$PRIMARY_MODEL_DIR" 2>/dev/null | head -1)" ]; then
+  log_success "Primary model already present at ${PRIMARY_MODEL_DIR}"
 else
-  log_success "DOCKER_HOST already set in ~/.zshrc"
-fi
-
-export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
-
-# --------------------------------------------------------------
-# 5. Install LaunchAgents
-# --------------------------------------------------------------
-log_info "Installing LaunchAgents..."
-
-# Resolve the real mlx_lm.server path once. The repo plist templates ship with
-# the generic default /usr/local/bin/mlx_lm.server; we substitute the real path
-# into each INSTALLED copy below (not the repo templates) so they stay portable.
-MLX_PATH="$(which mlx_lm.server 2>/dev/null || true)"
-DEFAULT_PATH="/usr/local/bin/mlx_lm.server"
-
-PLISTS=(
-  "com.mlx.fast.plist"
-  "com.mlx.indepth.plist"
-  "com.colima.server.plist"
-  "com.localllm.compose.plist"
-)
-
-for plist in "${PLISTS[@]}"; do
-  SRC="$REPO_DIR/launchagents/$plist"
-  DEST="$HOME/Library/LaunchAgents/$plist"
-
-  if [ ! -f "$SRC" ]; then
-    log_error "Plist not found: $SRC"
-  fi
-
-  cp "$SRC" "$DEST"
-  xattr -c "$DEST"  # Strip quarantine and any other extended attributes
-
-  # For MLX plists, bake the real mlx_lm.server path into the installed copy
-  # (not the repo template) if it differs from the generic default. Done before
-  # bootstrap so the agent starts with the correct path.
-  if [[ "$plist" == com.mlx.*.plist ]] && [ -n "$MLX_PATH" ] && [ "$MLX_PATH" != "$DEFAULT_PATH" ]; then
-    sed -i '' "s|$DEFAULT_PATH|$MLX_PATH|g" "$DEST"
-  fi
-
-  # Unload first in case it's already registered (ignore errors)
-  launchctl bootout "gui/$(id -u)" "$DEST" 2>/dev/null || true
-
-  launchctl bootstrap "gui/$(id -u)" "$DEST"
-  log_success "Loaded $plist"
-done
-
-if [ -n "$MLX_PATH" ] && [ "$MLX_PATH" != "$DEFAULT_PATH" ]; then
-  log_success "Installed MLX plists updated with path: $MLX_PATH"
-elif [ -z "$MLX_PATH" ]; then
-  log_warn "mlx_lm.server not on PATH — installed MLX plists kept the default path"
-  log_warn "Run 'pipx ensurepath && source ~/.zshrc' then re-run this script"
+  log_info "Downloading primary model (~17.5GB)..."
+  log_info "  ${PRIMARY_MODEL_REPO} → ${PRIMARY_MODEL_DIR}"
+  hf download "$PRIMARY_MODEL_REPO" --local-dir "$PRIMARY_MODEL_DIR"
+  log_success "Primary model downloaded"
 fi
 
 # --------------------------------------------------------------
-# 6. Copy Docker Compose file
+# 5. Ensure fallback model (OptiQ 4-bit) is preserved
 # --------------------------------------------------------------
-log_info "Copying docker-compose.yml..."
+log_info "Checking fallback model: ${FALLBACK_MODEL_REPO}"
 
-cp "$REPO_DIR/docker/docker-compose.yml" ~/docker/local-llm/docker-compose.yml
-log_success "docker-compose.yml copied to ~/docker/local-llm/"
-
-# --------------------------------------------------------------
-# 7. Start Colima
-# --------------------------------------------------------------
-log_info "Starting Colima..."
-
-if colima status 2>/dev/null | grep -q "colima is running"; then
-  log_success "Colima is already running"
+if [ -d "$FALLBACK_MODEL_DIR" ] && [ "$(ls -A "$FALLBACK_MODEL_DIR" 2>/dev/null | head -1)" ]; then
+  log_success "Fallback model preserved at ${FALLBACK_MODEL_DIR}"
 else
-  colima start --cpu 4 --memory 8 --disk 60
-  log_success "Colima started"
+  log_warn "Fallback model not found at ${FALLBACK_MODEL_DIR}"
+  log_info "  The fallback (censored OptiQ) is a safety net in case the"
+  log_info "  Heretic2 uncensored variant underperforms on Hermes tool-call."
+  log_info "  To download it later:"
+  log_info "    hf download ${FALLBACK_MODEL_REPO} --local-dir ${FALLBACK_MODEL_DIR}"
 fi
 
 # --------------------------------------------------------------
-# 8. Start Docker Compose stack
+# 6. Persist oMLX settings (model-dir, host, port)
 # --------------------------------------------------------------
-log_info "Starting Docker Compose stack..."
+log_info "Persisting oMLX settings to ~/.omlx/settings.json..."
 
-cd ~/docker/local-llm
-docker compose up -d
-log_success "Open WebUI and ChromaDB started"
+mkdir -p ~/.omlx
+
+# oMLX persists settings to ~/.omlx/settings.json when `omlx serve` runs
+# with CLI flags. We start it briefly in the background to write the
+# settings, then stop it and let `brew services` manage the lifecycle.
+#
+# The flags below set:
+#   --model-dir  : where oMLX discovers models (subdirectories of MLX models)
+#   --host       : bind to all interfaces so LAN clients can reach :8000
+#   --port       : the OpenAI-compatible API port (default 8000)
+#
+# NOTE: If `--host` is not a valid flag in your oMLX version, check
+#   `omlx serve --help` for the equivalent (may be an env var OMLX_HOST).
+#   The settings.json file is read by `brew services` on start.
+# Start oMLX briefly in the background so it writes ~/.omlx/settings.json,
+# then stop it. `brew services` will later pick up the persisted settings.
+SETTINGS_PERSISTED=false
+omlx serve --model-dir "$MODEL_DIR" --host 0.0.0.0 --port "$OMLX_PORT" >/dev/null 2>&1 &
+OMLX_PID=$!
+sleep 3  # let it write settings.json and begin listening
+if kill -0 "$OMLX_PID" 2>/dev/null; then
+  kill "$OMLX_PID" 2>/dev/null
+  wait "$OMLX_PID" 2>/dev/null || true
+  SETTINGS_PERSISTED=true
+  log_success "oMLX settings persisted (model-dir=${MODEL_DIR}, host=0.0.0.0, port=${OMLX_PORT})"
+else
+  log_warn "oMLX foreground start failed — check 'omlx serve --help' for flag compatibility"
+  log_warn "Will fall back to brew services with env vars"
+fi
 
 # --------------------------------------------------------------
-# 8b. Sync models to Open WebUI
+# 7. Start oMLX as a managed background service
 # --------------------------------------------------------------
-log_info "Syncing models to Open WebUI..."
+log_info "Starting oMLX as a brew service (auto-restart on crash, starts at boot)..."
 
-sync_openwebui_models() {
-  FAST_MODEL=$(curl -s http://localhost:8080/v1/models | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null)
-  INDEPTH_MODEL=$(curl -s http://localhost:8081/v1/models | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null)
+# Stop any existing instance first (idempotent)
+brew services stop omlx 2>/dev/null || true
 
-  if [ -z "$FAST_MODEL" ] || [ -z "$INDEPTH_MODEL" ]; then
-    log_warn "Skipping Open WebUI model sync — MLX APIs not responding"
-    return
+# If settings persisted above, brew services picks up ~/.omlx/settings.json.
+# If not, pass env vars inline via the brew services run.
+if [ "$SETTINGS_PERSISTED" = true ]; then
+  brew services start omlx
+else
+  # Fallback: set env vars in the brew service context
+  OMLX_MODEL_DIR="$MODEL_DIR" OMLX_HOST=0.0.0.0 OMLX_PORT="$OMLX_PORT" brew services start omlx
+fi
+
+sleep 5  # let the service come up
+
+if brew services info omlx 2>/dev/null | grep -qi "running"; then
+  log_success "oMLX service is running"
+else
+  log_warn "oMLX service may still be starting — check: brew services info omlx"
+fi
+
+# --------------------------------------------------------------
+# 8. Firewall — allow incoming LAN connections to oMLX
+# --------------------------------------------------------------
+log_info "Configuring macOS firewall to allow LAN access to oMLX..."
+
+# oMLX runs under a brew-venv Python interpreter. Find the actual binary
+# that listens on :8000 and allowlist it.
+OMLX_BIN=""
+if pgrep -f "omlx serve" >/dev/null 2>&1; then
+  # Discover the actual listening binary via lsof
+  OMLX_BIN=$(lsof -nP -iTCP:"$OMLX_PORT" -sTCP:LISTEN 2>/dev/null | tail -1 | awk '{print $1}')
+  if [ -n "$OMLX_BIN" ]; then
+    # Resolve the full path of the process binary
+    OMLX_PID=$(pgrep -f "omlx serve" | head -1)
+    OMLX_BIN=$(ps -p "$OMLX_PID" -o comm= 2>/dev/null || echo "")
   fi
+fi
 
-  docker exec open-webui python3 - "$FAST_MODEL" "$INDEPTH_MODEL" << 'PYEOF'
-import sys, sqlite3, json, time
-
-fast_model = sys.argv[1]
-indepth_model = sys.argv[2]
-
-conn = sqlite3.connect('/app/backend/data/webui.db')
-cur = conn.cursor()
-now = int(time.time())
-
-cur.execute('SELECT id FROM "user" LIMIT 1')
-user_id = cur.fetchone()[0]
-
-meta_fast = json.dumps({
-    "profile_image_url": "/static/favicon.png",
-    "capabilities": {
-        "file_context": True, "vision": True, "file_upload": True,
-        "web_search": True, "image_generation": True, "code_interpreter": True,
-        "terminal": True, "citations": True, "status_updates": True,
-        "memory": True, "builtin_tools": True
-    },
-    "tags": [],
-    "defaultFeatureIds": ["web_search", "image_generation", "code_interpreter"]
-})
-meta_indepth = json.dumps({
-    "profile_image_url": "/static/favicon.png",
-    "capabilities": {
-        "file_context": True, "vision": True, "file_upload": True,
-        "web_search": True, "image_generation": True, "code_interpreter": True,
-        "terminal": True, "citations": True, "status_updates": True,
-        "memory": True, "builtin_tools": True
-    },
-    "tags": [],
-    "defaultFeatureIds": ["web_search", "image_generation", "code_interpreter"],
-    "toolIds": ["web_search_and_crawl", "sub_agent"]
-})
-
-cur.execute('DELETE FROM model')
-cur.execute('INSERT INTO model (id, user_id, name, meta, params, created_at, updated_at, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    (fast_model, user_id, 'Fast', meta_fast, '{}', now, now, 1))
-cur.execute('INSERT INTO model (id, user_id, name, meta, params, created_at, updated_at, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    (indepth_model, user_id, 'In-Depth', meta_indepth, '{}', now, now, 1))
-
-cur.execute('SELECT value FROM config WHERE key=?', ('openai.api_configs',))
-configs = json.loads(cur.fetchone()[0])
-configs['0']['model_ids'] = [fast_model]
-configs['1']['model_ids'] = [indepth_model]
-cur.execute('UPDATE config SET value=? WHERE key=?', (json.dumps(configs), 'openai.api_configs'))
-
-conn.commit()
-print(f'OK: models synced: {fast_model}, {indepth_model}')
-PYEOF
-
-  if [ $? -eq 0 ]; then
-    log_success "Open WebUI models synced"
-  else
-    log_warn "Open WebUI model sync failed"
-  fi
-}
-
-sync_openwebui_models
+if [ -n "$OMLX_BIN" ] && [ -x "$OMLX_BIN" ]; then
+  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "$OMLX_BIN" 2>/dev/null || true
+  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock "$OMLX_BIN" 2>/dev/null || true
+  log_success "Firewall rule added for: ${OMLX_BIN}"
+  log_warn "NOTE: re-run this after 'brew upgrade omlx' (the interpreter path changes)"
+else
+  log_warn "Could not auto-discover the oMLX listener binary for the firewall."
+  log_warn "After verifying the server is up, run manually:"
+  log_warn "  LISTENER=\$(lsof -nP -iTCP:${OMLX_PORT} -sTCP:LISTEN | tail -1 | awk '{print \$1}')"
+  log_warn "  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add \"\$LISTENER\""
+  log_warn "  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock \"\$LISTENER\""
+fi
 
 # --------------------------------------------------------------
 # 9. Final health check
 # --------------------------------------------------------------
 echo ""
-log_info "Waiting 15 seconds for services to initialize..."
+log_info "Waiting 15 seconds for oMLX to load models..."
 sleep 15
 
 echo ""
@@ -293,50 +221,45 @@ echo "=============================================="
 echo "  Health Check"
 echo "=============================================="
 
-# Colima
-if colima status 2>/dev/null | grep -q "colima is running"; then
-  log_success "Colima is running"
+# oMLX service
+if brew services info omlx 2>/dev/null | grep -qi "running"; then
+  log_success "oMLX brew service is running"
 else
-  log_warn "Colima is NOT running"
+  log_warn "oMLX service not reporting as running"
+  log_warn "Check: brew services info omlx"
 fi
 
-# MLX APIs
-if curl -sf http://localhost:8080/v1/models >/dev/null; then
-  log_success "MLX fast model API responding on :8080"
+# oMLX API
+if curl -sf --max-time 10 "http://localhost:${OMLX_PORT}/v1/models" >/dev/null 2>&1; then
+  log_success "oMLX API responding on :${OMLX_PORT}"
 else
-  log_warn "MLX fast model API not responding — model may still be loading"
+  log_warn "oMLX API not responding — model may still be loading"
 fi
 
-if curl -sf http://localhost:8081/v1/models >/dev/null; then
-  log_success "MLX indepth model API responding on :8081"
-else
-  log_warn "MLX indepth model API not responding — model may still be loading"
-fi
-
-# ChromaDB
-if curl -sf http://localhost:8000/api/v2/heartbeat >/dev/null; then
-  log_success "ChromaDB responding on :8000"
-else
-  log_warn "ChromaDB not responding"
-fi
-
-# Open WebUI
-if curl -sf -o /dev/null http://localhost:3000; then
-  log_success "Open WebUI responding on :3000"
-else
-  log_warn "Open WebUI not responding — may still be starting"
-fi
+# List discovered models
+echo ""
+log_info "Discovered models at http://localhost:${OMLX_PORT}/v1/models:"
+curl -s --max-time 10 "http://localhost:${OMLX_PORT}/v1/models" 2>/dev/null \
+  | python3 -c "import sys,json; [print(f'  - {m[\"id\"]}') for m in json.load(sys.stdin).get('data',[])]" 2>/dev/null \
+  || log_warn "Could not list models (API may still be starting)"
 
 echo ""
 echo "=============================================="
 echo "  Install complete!"
 echo ""
-echo "  Open WebUI:         http://$(ipconfig getifaddr en0):3000"
-echo "  MLX fast API:       http://$(ipconfig getifaddr en0):8080/v1"
-echo "  MLX indepth API:    http://$(ipconfig getifaddr en0):8081/v1"
-echo "  ChromaDB:           http://$(ipconfig getifaddr en0):8000"
+HOST_IP=$(ipconfig getifaddr en0 2>/dev/null || echo "<MAC_STUDIO_IP>")
+echo "  oMLX API:           http://${HOST_IP}:${OMLX_PORT}/v1"
+echo "  oMLX Admin UI:      http://${HOST_IP}:${OMLX_PORT}/admin"
 echo ""
-echo "  Remember to enable auto-login for headless boot:"
-echo "  System Settings → General → Login Items & Extensions"
+echo "  Headless access to Admin UI (from another machine):"
+echo "    ssh -L ${OMLX_PORT}:localhost:${OMLX_PORT} ${USER}@${HOST_IP}"
+echo "  Then open http://localhost:${OMLX_PORT}/admin in your browser"
+echo ""
+echo "  Next steps:"
+echo "    1. Use the Admin UI to pin the primary model and configure"
+echo "       profiles (thinking on/off) — see README.md"
+echo "    2. Point Hermes / Open WebUI / Home Assistant at the endpoint"
+echo "       above (see README.md per-app routing guide)"
+echo "    3. Verify with: ./scripts/status.sh"
 echo "=============================================="
 echo ""
