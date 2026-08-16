@@ -28,8 +28,8 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 # Config
 MODEL_DIR="/opt/models"
-PRIMARY_MODEL_REPO="mlx-community/Qwen3.6-27B-Heretic2-Uncensored-Finetune-Thinking-OptiQ-4bit"
-PRIMARY_MODEL_DIR="${MODEL_DIR}/qwen3.6-27b-heretic2-uncensored"
+PRIMARY_MODEL_REPO="mlx-community/Qwen3.8-27B-4bit"
+PRIMARY_MODEL_DIR="${MODEL_DIR}/qwen3.8-27b-4bit"
 OMLX_PORT="8000"
 
 # Parse args — default to all if none provided
@@ -68,7 +68,12 @@ if [ "$UPDATE_OMLX" = true ]; then
   brew update
 
   log_info "Upgrading oMLX..."
-  brew upgrade omlx 2>/dev/null && log_success "oMLX upgraded" || log_success "oMLX already at latest version"
+  if brew upgrade omlx; then
+    log_success "oMLX upgraded"
+    log_info "Installed version: $(brew info omlx | head -1)"
+  else
+    log_error "brew upgrade omlx failed — check \$(brew --prefix)/var/log/omlx.log"
+  fi
 
   log_info "Restarting oMLX brew service..."
   brew services restart omlx
@@ -76,15 +81,24 @@ if [ "$UPDATE_OMLX" = true ]; then
 
   # Re-allowlist the interpreter after upgrade — the Python binary path
   # changes on each omlx upgrade, so the old firewall rule no longer applies.
-  log_info "Re-allowlisting oMLX listener in macOS firewall..."
+  # Only relevant when the macOS Application Firewall is enabled.
   sleep 5  # let the service come up and bind the port
-  if pgrep -f "omlx" >/dev/null 2>&1; then
-    OMLX_PID=$(pgrep -f "omlx" | head -1)
+  FW_STATE=$(/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null || echo "unknown")
+  if echo "$FW_STATE" | grep -qi "disabled"; then
+    log_success "Application Firewall is disabled — no rule refresh needed"
+  elif pgrep -f "omlx serve" >/dev/null 2>&1; then
+    OMLX_PID=$(pgrep -f "omlx serve" | head -1)
     OMLX_BIN=$(ps -p "$OMLX_PID" -o comm= 2>/dev/null || echo "")
     if [ -n "$OMLX_BIN" ] && [ -x "$OMLX_BIN" ]; then
-      sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "$OMLX_BIN" 2>/dev/null || true
-      sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock "$OMLX_BIN" 2>/dev/null || true
-      log_success "Firewall rule refreshed for: ${OMLX_BIN}"
+      log_info "Re-allowlisting oMLX listener in macOS firewall..."
+      if sudo -n /usr/libexec/ApplicationFirewall/socketfilterfw --add "$OMLX_BIN" 2>/dev/null \
+        && sudo -n /usr/libexec/ApplicationFirewall/socketfilterfw --unblock "$OMLX_BIN" 2>/dev/null; then
+        log_success "Firewall rule refreshed for: ${OMLX_BIN}"
+      else
+        log_warn "Firewall refresh needs sudo — run manually:"
+        log_warn "  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add \"$OMLX_BIN\""
+        log_warn "  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock \"$OMLX_BIN\""
+      fi
     else
       log_warn "Could not find oMLX listener binary to re-allowlist"
       log_warn "Run manually: sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add \$(ps -p \$(pgrep -f 'omlx serve' | head -1) -o comm=)"

@@ -13,11 +13,12 @@ macOS (headless, SSH-only — no Docker, no Colima)
 └── oMLX (brew service, auto-restart on crash, starts at boot)
     ├── Port 8000, bound to 0.0.0.0
     ├── Model dir: /opt/models
-    ├── Primary: qwen3.6-27b-heretic2-uncensored (OptiQ 4-bit, ~17.5GB)
-    ├── Fallback (on disk, swappable): qwen3.6-27b-optiq (censored, OptiQ 4-bit)
+    ├── Primary: qwen3.8-27b-4bit (VLM, 4-bit, ~16.9GB, censored base)
+    ├── Rollbacks (on disk, swappable): qwen3.6-27b-heretic2-uncensored (uncensored)
+    │                                  qwen3.6-27b-optiq (proven tool-call)
     ├── Profiles (zero extra RAM):
-    │   ├── qwen3.6-27b-heretic2           (thinking OFF — Hermes tool-call)
-    │   └── qwen3.6-27b-heretic2:thinking  (thinking ON  — HA / Open WebUI chat)
+    │   ├── qwen3.8-27b-4bit:qwen3-8-27b-tool      (thinking OFF — Hermes tool-call)
+    │   └── qwen3.8-27b-4bit:qwen3-8-27b-thinking  (thinking ON  — HA / Open WebUI chat)
     └── Admin UI: :8000/admin  (SSH-tunneled from another machine)
 
 Clients (all on OTHER LAN hosts — nothing else runs on the Mac Studio):
@@ -33,7 +34,7 @@ oMLX exposes an OpenAI-compatible endpoint (`/v1/chat/completions`, `/v1/models`
 ## Hardware Requirements
 
 - Apple Silicon Mac (M1 or later)
-- 32GB unified memory recommended (the 27B model at 4-bit is ~17.5GB weights + KV cache)
+- 32GB unified memory recommended (the 27B model at 4-bit is ~16.9GB weights + KV cache)
 - macOS 15.0+ (Sequoia) — required by oMLX
 
 ---
@@ -72,7 +73,7 @@ chmod +x scripts/*.sh
 This single command:
 1. Installs oMLX via Homebrew (`brew tap jundot/omlx && brew install omlx`)
 2. Creates `/opt/models` if missing (preserves any existing models)
-3. Downloads the primary model: `mlx-community/Qwen3.6-27B-Heretic2-Uncensored-Finetune-Thinking-OptiQ-4bit` (~17.5GB)
+3. Downloads the primary model: `mlx-community/Qwen3.8-27B-4bit` (~16.9GB)
 4. Preserves the fallback model at `/opt/models/qwen3.6-27b-optiq` if already present
 5. Persists oMLX settings (`~/.omlx/settings.json`) with `--model-dir /opt/models --host 0.0.0.0 --port 8000`
 6. Starts oMLX as a brew service (`brew services start omlx` — auto-restart on crash, starts at boot)
@@ -90,10 +91,10 @@ ssh -L 8000:localhost:8000 <user>@<MAC_STUDIO_IP>
 ```
 
 In the admin panel:
-1. **Pin** the primary model (`qwen3.6-27b-heretic2-uncensored`) so it stays loaded.
+1. **Pin** the primary model (`qwen3.8-27b-4bit`) so it stays loaded.
 2. **Create two profiles** for the pinned model:
-   - `qwen3.6-27b-heretic2` — chat template kwargs `{"enable_thinking": false}` (for Hermes tool-call)
-   - `qwen3.6-27b-heretic2:thinking` — default kwargs (thinking ON, for general chat)
+   - `qwen3.8-27b:tool` — chat template kwargs `{"enable_thinking": false}` (for Hermes tool-call)
+   - `qwen3.8-27b:thinking` — default kwargs (thinking ON, for general chat)
 3. **Expose both profiles as models** (toggle "Expose as model" on each) so they appear on `/v1/models`.
 4. **Disable API key auth** if you want unauthenticated LAN access (see [API key warning](#api-key-warning-on-first-connect) below).
 
@@ -151,24 +152,25 @@ Settings are persisted to `~/.omlx/settings.json` and can be edited via the admi
 
 | Property | Value |
 |---|---|
-| HuggingFace repo | `mlx-community/Qwen3.6-27B-Heretic2-Uncensored-Finetune-Thinking-OptiQ-4bit` |
-| Local path | `/opt/models/qwen3.6-27b-heretic2-uncensored` |
-| Quant | OptiQ 4-bit (~17.5GB weights) |
-| Base | Qwen3.6-27B |
-| Finetune | Heretic2 (uncensored) |
-| Tool-call reliability | Unverified for this finetune — see [Fallback model](#fallback-model) below |
+| HuggingFace repo | `mlx-community/Qwen3.8-27B-4bit` |
+| Local path | `/opt/models/qwen3.8-27b-4bit` |
+| Quant | 4-bit (~16.9GB weights), full VLM (vision tower included) |
+| Base | Qwen3.8-27B (Qwen3.5-architecture hybrid: Gated DeltaNet + attention) |
+| Tool-call | Qwen3.5-series XML `<function=...>` format — verified working |
+| Thinking | ON by default; `enable_thinking` + `reasoning_effort` (xhigh/medium/low) supported |
+| oMLX requirement | >= 0.6.0rc1 |
 
-### Fallback model
+### Fallback / rollback models
 
 | Property | Value |
 |---|---|
-| HuggingFace repo | `mlx-community/Qwen3.6-27B-OptiQ-4bit` |
-| Local path | `/opt/models/qwen3.6-27b-optiq` |
-| Quant | OptiQ 4-bit (~17.5GB weights) |
-| Tool-call reliability | Proven (BFCL-V3 function-calling score: 92.5%) |
-| Censored | Yes — will refuse some requests |
+| Rollback repo | `mlx-community/Qwen3.6-27B-Heretic2-Uncensored-Finetune-Thinking-OptiQ-4bit` |
+| Rollback path | `/opt/models/qwen3.6-27b-heretic2-uncensored` (uncensored) |
+| Fallback repo | `mlx-community/Qwen3.6-27B-OptiQ-4bit` |
+| Fallback path | `/opt/models/qwen3.6-27b-optiq` |
+| Fallback tool-call | Proven (BFCL-V3 function-calling score: 92.5%) |
 
-The fallback is kept on disk as a safety net. If the Heretic2 uncensored variant underperforms on Hermes tool-call loops, swap to the fallback via the oMLX admin panel (pin the fallback, unpin the primary) — no re-download needed.
+Both stay on disk as safety nets. If Qwen3.8 underperforms on Hermes tool-call loops, swap to the OptiQ fallback via the oMLX admin panel (or `is_pinned` in `~/.omlx/model_settings.json`); if censorship refusals bite, swap to the Heretic2 rollback. No re-download needed.
 
 ### Swapping models
 
@@ -192,9 +194,9 @@ All clients point at the same endpoint. The `model` field in requests selects wh
 
 | App | Endpoint | Model field | Profile |
 |---|---|---|---|
-| **Home Assistant** | `http://<MAC_STUDIO_IP>:8000/v1` | `qwen3.6-27b-heretic2:thinking` | Thinking ON for richer HA responses |
+| **Home Assistant** | `http://<MAC_STUDIO_IP>:8000/v1` | `qwen3.8-27b-4bit:qwen3-8-27b-thinking` | Thinking ON for richer HA responses |
 | **Open WebUI (unRAID)** | `http://<MAC_STUDIO_IP>:8000/v1` | pick from model picker | Both profiles available |
-| **Hermes Agent** | `http://<MAC_STUDIO_IP>:8000/v1` | `qwen3.6-27b-heretic2` | Thinking OFF for clean tool-call JSON |
+| **Hermes Agent** | `http://<MAC_STUDIO_IP>:8000/v1` | `qwen3.8-27b-4bit:qwen3-8-27b-tool` | Thinking OFF for clean tool calls |
 
 Find the Mac Studio's LAN IP:
 
@@ -244,7 +246,7 @@ hermes model
 # → Select "Custom endpoint (self-hosted / VLLM / etc.)"
 # → API base URL:  http://<MAC_STUDIO_IP>:8000/v1
 # → API key:       (leave blank — local server needs none)
-# → Model name:    qwen3.6-27b-heretic2
+# → Model name:    qwen3.8-27b-4bit:qwen3-8-27b-tool
 ```
 
 Or set it directly:
@@ -252,7 +254,7 @@ Or set it directly:
 ```bash
 hermes config set model.provider custom
 hermes config set model.base_url http://<MAC_STUDIO_IP>:8000/v1
-hermes config set model.default qwen3.6-27b-heretic2
+hermes config set model.default qwen3.8-27b-4bit:qwen3-8-27b-tool
 ```
 
 > **Use the model alias/profile name, not the local path.** oMLX advertises model IDs (aliases or directory names) on `/v1/models`, not on-disk paths like the old `mlx_lm.server` did. Check `curl http://localhost:8000/v1/models` for the exact IDs to use.
@@ -263,7 +265,7 @@ Hermes **rejects** endpoints with under 64,000 tokens of context at startup. oML
 
 ### Why thinking is disabled for Hermes
 
-The `qwen3.6-27b-heretic2` profile passes `{"enable_thinking": false}`. Reasoning models emit a `<think>…</think>` block *before* the answer; in an agent loop that block can consume the entire token budget before a tool call is emitted, and the resulting tool-call JSON is often malformed. Disabling thinking keeps tool calls clean and reliable.
+The `qwen3.8-27b-4bit:qwen3-8-27b-tool` profile passes `{"enable_thinking": false}`. Reasoning models emit a `<think>…</think>` block *before* the answer; in an agent loop that block can consume the entire token budget before a tool call is emitted, and the resulting tool-call JSON is often malformed. Disabling thinking keeps tool calls clean and reliable.
 
 ### Verify the integration
 
@@ -282,7 +284,7 @@ hermes
 #    end-to-end without a truncated/malformed response.
 ```
 
-> **If Heretic2 tool-call is unreliable:** swap to the fallback via the admin panel (pin `/opt/models/qwen3.6-27b-optiq`, unpin the Heretic2 model), then update Hermes: `hermes config set model.default qwen3.6-27b-optiq`. No re-architecting needed.
+> **If Qwen3.8 tool-call is unreliable:** swap to the fallback via the admin panel (pin `/opt/models/qwen3.6-27b-optiq`, unpin Qwen3.8), then update Hermes: `hermes config set model.default qwen3.6-27b-optiq`. If censorship refusals bite, swap to the Heretic2 rollback at `/opt/models/qwen3.6-27b-heretic2-uncensored`. No re-architecting needed.
 
 ---
 
@@ -295,7 +297,7 @@ Open WebUI runs on your unRAID server (not on the Mac Studio). Point it at the M
    - **Base URL:** `http://<MAC_STUDIO_IP>:8000/v1`
    - **API Key:** (leave blank — local server needs none)
 3. Save. Open WebUI will discover all models/profiles from oMLX's `/v1/models`.
-4. The model picker will show both `qwen3.6-27b-heretic2` and `qwen3.6-27b-heretic2:thinking`.
+4. The model picker will show both `qwen3.8-27b-4bit:qwen3-8-27b-tool` and `qwen3.8-27b-4bit:qwen3-8-27b-thinking`.
 
 > **SearXNG** also runs on unRAID. It is out of scope for this repo — configure it on the unRAID side.
 
@@ -396,7 +398,7 @@ Then restart: `brew services restart omlx`.
 
 ### RAM pressure / swap on 32GB
 
-The 27B model at 4-bit (~17.5GB weights) plus KV cache plus macOS overhead sits near the 32GB ceiling under concurrent HA + Hermes load. Mitigations:
+The 27B model at 4-bit (~16.9GB weights) plus KV cache plus macOS overhead sits near the 32GB ceiling under concurrent HA + Hermes load. Mitigations:
 
 - In the oMLX admin panel, set a memory guard: `--memory-guard safe` or `--memory-guard-gb 24`
 - Enable SSD KV cache: `--paged-ssd-cache-dir ~/.omlx/cache` (offloads cold KV blocks to disk)

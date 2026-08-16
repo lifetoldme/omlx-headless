@@ -27,8 +27,8 @@ log_error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 # Config
 MODEL_DIR="/opt/models"
-PRIMARY_MODEL_REPO="mlx-community/Qwen3.6-27B-Heretic2-Uncensored-Finetune-Thinking-OptiQ-4bit"
-PRIMARY_MODEL_DIR="${MODEL_DIR}/qwen3.6-27b-heretic2-uncensored"
+PRIMARY_MODEL_REPO="mlx-community/Qwen3.8-27B-4bit"
+PRIMARY_MODEL_DIR="${MODEL_DIR}/qwen3.8-27b-4bit"
 FALLBACK_MODEL_REPO="mlx-community/Qwen3.6-27B-OptiQ-4bit"
 FALLBACK_MODEL_DIR="${MODEL_DIR}/qwen3.6-27b-optiq"
 OMLX_PORT="8000"
@@ -90,14 +90,14 @@ else
 fi
 
 # --------------------------------------------------------------
-# 4. Download primary model (Heretic2 uncensored + OptiQ 4-bit)
+# 4. Download primary model (Qwen3.8-27B, 4-bit VLM)
 # --------------------------------------------------------------
 log_info "Checking primary model: ${PRIMARY_MODEL_REPO}"
 
 if [ -d "$PRIMARY_MODEL_DIR" ] && [ "$(ls -A "$PRIMARY_MODEL_DIR" 2>/dev/null | head -1)" ]; then
   log_success "Primary model already present at ${PRIMARY_MODEL_DIR}"
 else
-  log_info "Downloading primary model (~17.5GB)..."
+  log_info "Downloading primary model (~16.9GB)..."
   log_info "  ${PRIMARY_MODEL_REPO} → ${PRIMARY_MODEL_DIR}"
   hf download "$PRIMARY_MODEL_REPO" --local-dir "$PRIMARY_MODEL_DIR"
   log_success "Primary model downloaded"
@@ -113,7 +113,7 @@ if [ -d "$FALLBACK_MODEL_DIR" ] && [ "$(ls -A "$FALLBACK_MODEL_DIR" 2>/dev/null 
 else
   log_warn "Fallback model not found at ${FALLBACK_MODEL_DIR}"
   log_info "  The fallback (censored OptiQ) is a safety net in case the"
-  log_info "  Heretic2 uncensored variant underperforms on Hermes tool-call."
+  log_info "  primary underperforms on Hermes tool-call."
   log_info "  To download it later:"
   log_info "    hf download ${FALLBACK_MODEL_REPO} --local-dir ${FALLBACK_MODEL_DIR}"
 fi

@@ -24,7 +24,8 @@ Never do any of the following on the Mac Studio:
 - ❌ Start Colima, Docker, or any container runtime
 - ❌ Install Open WebUI, SearXNG, ChromaDB, or any other LLM-adjacent service
 - ❌ Delete `/opt/models/qwen3.6-27b-optiq` (it is the fallback safety net)
-- ❌ Run `brew upgrade omlx` without then re-allowlisting the new interpreter in the firewall
+- ❌ Delete `/opt/models/qwen3.6-27b-heretic2-uncensored` (uncensored rollback option)
+- ❌ Run `brew upgrade omlx` without then re-allowlisting the new interpreter in the firewall (unless the Application Firewall is disabled — check `socketfilterfw --getglobalstate`)
 - ❌ Assume the admin UI is reachable at `<MAC_STUDIO_IP>:8000/admin` from the Mac Studio itself without a tunnel — use `localhost:8000/admin` over an SSH tunnel
 
 ---
@@ -89,8 +90,13 @@ Models live in `/opt/models/<name>`. oMLX auto-discovers MLX-format model subdir
 
 | Directory | Model | Role |
 |---|---|---|
-| `/opt/models/qwen3.6-27b-heretic2-uncensored` | `mlx-community/Qwen3.6-27B-Heretic2-Uncensored-Finetune-Thinking-OptiQ-4bit` | Primary (uncensored, OptiQ 4-bit) |
+| `/opt/models/qwen3.8-27b-4bit` | `mlx-community/Qwen3.8-27B-4bit` | Primary (VLM, 4-bit, ~16.9GB, censored base) |
+| `/opt/models/qwen3.6-27b-heretic2-uncensored` | `mlx-community/Qwen3.6-27B-Heretic2-Uncensored-Finetune-Thinking-OptiQ-4bit` | Rollback (uncensored, OptiQ 4-bit) |
 | `/opt/models/qwen3.6-27b-optiq` | `mlx-community/Qwen3.6-27B-OptiQ-4bit` | Fallback (censored, OptiQ 4-bit, proven tool-call) |
+| `/opt/models/bge-m3` | `BAAI/bge-m3` | Embeddings (HA / RAG) |
+| `/opt/models/qwen3-reranker` | `Qwen/Qwen3-Reranker` | Reranking |
+
+Qwen3.8 requires oMLX >= 0.6.0rc1 (Qwen3.5-family compatibility path). Keep oMLX current via `scripts/update.sh --omlx`.
 
 ### Downloading a new model
 
@@ -107,9 +113,11 @@ It will appear in the admin panel's model list after a service restart (or immed
 3. oMLX's LRU eviction handles the swap — only one 27B model is loaded at a time on 32GB.
 4. Update any client configs (Hermes, Open WebUI, Home Assistant) to use the new model ID.
 
-### Do NOT delete the fallback
+Headless alternative: stop the service, flip `is_pinned` in `~/.omlx/model_settings.json`, start.
 
-The OptiQ fallback at `/opt/models/qwen3.6-27b-optiq` is the safety net in case the Heretic2 uncensored variant underperforms on Hermes tool-call loops. Keep it on disk even if it is not pinned.
+### Do NOT delete the fallbacks
+
+The OptiQ fallback at `/opt/models/qwen3.6-27b-optiq` is the safety net in case the primary underperforms on Hermes tool-call loops, and `/opt/models/qwen3.6-27b-heretic2-uncensored` is the uncensored rollback. Keep both on disk even when not pinned.
 
 ---
 
@@ -117,12 +125,21 @@ The OptiQ fallback at `/opt/models/qwen3.6-27b-optiq` is the safety net in case 
 
 Profiles are configured via the admin UI (SSH-tunneled). They expose one loaded model as multiple model IDs on `/v1/models` at zero extra RAM cost.
 
+For headless management (no tunnel), the same state lives in JSON:
+
+| File | Contents |
+|---|---|
+| `~/.omlx/model_settings.json` | Per-model settings incl. `is_pinned`, `is_default` |
+| `~/.omlx/model_profiles.json` | Profiles incl. `display_name`, `api_name`, `expose_as_model` |
+
+Edit while the service is stopped (`brew services stop omlx`), then start. Profile `api_name` is what appears after `:` in the exposed model ID (`<model-id>:<api_name>`).
+
 ### Current profiles
 
 | Profile name | Thinking | Use case |
 |---|---|---|
-| `qwen3.6-27b-heretic2` | OFF | Hermes Agent tool-call (clean JSON, no thinking block) |
-| `qwen3.6-27b-heretic2:thinking` | ON | Home Assistant / Open WebUI general chat |
+| `qwen3.8-27b-4bit:qwen3-8-27b-tool` | OFF | Hermes Agent tool-call (clean XML, no thinking block) |
+| `qwen3.8-27b-4bit:qwen3-8-27b-thinking` | ON | Home Assistant / Open WebUI general chat |
 
 ### Why
 
@@ -132,9 +149,11 @@ Hermes tool-call needs thinking OFF — a `<think>` block can consume the token 
 
 ## Firewall
 
-The macOS Application Firewall blocks incoming connections by default. `install.sh` and `update.sh --omlx` automatically add the oMLX listener binary to the allowlist.
+The macOS Application Firewall blocks incoming connections by default. `install.sh` and `update.sh --omlx` automatically add the oMLX listener binary to the allowlist when the firewall is enabled.
 
-**After every `brew upgrade omlx`:** the Python interpreter path changes, so the old firewall rule no longer applies. Re-allowlist:
+**Current state on this box: Application Firewall is DISABLED** (`socketfilterfw --getglobalstate` → "Firewall is disabled"). No rule refresh is needed after upgrades while it stays disabled; `update.sh` checks this automatically.
+
+If it is ever re-enabled, after every `brew upgrade omlx` the Python interpreter path changes, so the old firewall rule no longer applies. Re-allowlist:
 
 ```bash
 OMLX_PID=$(pgrep -f "omlx serve" | head -1)
