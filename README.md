@@ -405,6 +405,45 @@ The 27B model at 4-bit (~16.9GB weights) plus KV cache plus macOS overhead sits 
 - Reduce max concurrent requests: `--max-concurrent-requests 4` (default is 8)
 - Drop to a smaller model if sustained swap is observed
 
+### Metal wired-memory limit (prefill guard rejections)
+
+When oMLX rejects prompts with `prefill_memory_exceeded` / pre-chunk guard errors (empty or timed-out completions, litellm gateways failing), the Metal ceiling is too tight: with the kernel default the Metal cap on 32GB is ~24.96GB and oMLX's guard ceiling sits at ~23.7GB. Raise the kernel cap:
+
+```bash
+sudo sysctl -w iogpu.wired_limit_mb=28672
+```
+
+This is runtime-only and resets on reboot. `sudo nvram boot-args="iogpu.wired_limit_mb=28672"` is **SIP-blocked** on Apple Silicon — persist with a root LaunchDaemon instead (installed on this box as `com.beaty.wired-limit`):
+
+```xml
+<!-- /Library/LaunchDaemons/com.beaty.wired-limit.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.beaty.wired-limit</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/sbin/sysctl</string>
+        <string>-w</string>
+        <string>iogpu.wired_limit_mb=28672</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+```
+
+```bash
+sudo cp <plist> /Library/LaunchDaemons/com.beaty.wired-limit.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.beaty.wired-limit.plist
+# verify after a reboot:
+sysctl -n iogpu.wired_limit_mb   # -> 28672
+```
+
+If you raise the limit later, update the plist value too. If the box still runs hot at 28GB, harden further in the admin panel: Memory Guard `aggressive` (`--memory-guard aggressive`) or a custom `--memory-guard-gb 26`, plus the SSD KV cache and lower concurrency above.
+
 ### oMLX `--host` flag not recognized
 
 If `omlx serve --host 0.0.0.0` errors with an unknown-flag message, check `omlx serve --help` for the current flag name. You can also set it via environment variable: `OMLX_HOST=0.0.0.0 brew services start omlx`, or edit `~/.omlx/settings.json` directly.
