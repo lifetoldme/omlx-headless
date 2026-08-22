@@ -90,13 +90,16 @@ Models live in `/opt/models/<name>`. oMLX auto-discovers MLX-format model subdir
 
 | Directory | Model | Role |
 |---|---|---|
-| `/opt/models/qwen3.8-27b-4bit` | `mlx-community/Qwen3.8-27B-4bit` | Primary (VLM, 4-bit, ~16.9GB, censored base) |
-| `/opt/models/qwen3.6-27b-heretic2-uncensored` | `mlx-community/Qwen3.6-27B-Heretic2-Uncensored-Finetune-Thinking-OptiQ-4bit` | Rollback (uncensored, OptiQ 4-bit) |
-| `/opt/models/qwen3.6-27b-optiq` | `mlx-community/Qwen3.6-27B-OptiQ-4bit` | Fallback (censored, OptiQ 4-bit, proven tool-call) |
+| `/opt/models/qwen3.8-27b-uncensored-oq4e-fp16-mtp` | `pyros-vault/Qwen3.8-27B-Uncensored-oQ4e-fp16-mtp` | **Primary** (VLM, oQ4e 4-bit + FP16 MTP head, ~17GB, uncensored, Lightning VLM-MTP enabled) |
+| `/opt/models/qwen3.8-27b-4bit` | `mlx-community/Qwen3.8-27B-4bit` | Rollback (VLM, 4-bit, ~16.9GB, censored base) |
 | `/opt/models/bge-m3` | `BAAI/bge-m3` | Embeddings (HA / RAG) |
 | `/opt/models/qwen3-reranker` | `Qwen/Qwen3-Reranker` | Reranking |
 
+The Qwen3.6 fallbacks (`qwen3.6-27b-optiq`, `qwen3.6-27b-heretic2-uncensored`) are no longer on disk as of 2026-08-22. If a Hermes tool-call regression appears on the uncensored primary, either download `mlx-community/Qwen3.6-27B-OptiQ-4bit` fresh or unpin back to `qwen3.8-27b-4bit`.
+
 Qwen3.8 requires oMLX >= 0.6.0rc1 (Qwen3.5-family compatibility path). Keep oMLX current via `scripts/update.sh --omlx`.
+
+Note: `mtp_enabled` and `vlm_mtp_enabled` are mutually exclusive in `model_settings.json` — oMLX rejects the settings entry if both are true. For the VLM primary, only `vlm_mtp_enabled: true` is set.
 
 ### Downloading a new model
 
@@ -115,9 +118,9 @@ It will appear in the admin panel's model list after a service restart (or immed
 
 Headless alternative: stop the service, flip `is_pinned` in `~/.omlx/model_settings.json`, start.
 
-### Do NOT delete the fallbacks
+### Do NOT delete the rollback
 
-The OptiQ fallback at `/opt/models/qwen3.6-27b-optiq` is the safety net in case the primary underperforms on Hermes tool-call loops, and `/opt/models/qwen3.6-27b-heretic2-uncensored` is the uncensored rollback. Keep both on disk even when not pinned.
+The censored rollback at `/opt/models/qwen3.8-27b-4bit` is the safety net in case the uncensored primary underperforms on Hermes tool-call loops. Keep it on disk even when not pinned.
 
 ---
 
@@ -138,8 +141,8 @@ Edit while the service is stopped (`brew services stop omlx`), then start. Profi
 
 | Profile name | Thinking | Use case |
 |---|---|---|
-| `qwen3.8-27b-4bit:qwen3-8-27b-tool` | OFF | Hermes Agent tool-call (clean XML, no thinking block) |
-| `qwen3.8-27b-4bit:qwen3-8-27b-thinking` | ON | Home Assistant / Open WebUI general chat |
+| `qwen3.8-27b-uncensored-oq4e-fp16-mtp:qwen3-8-27b-tool` | OFF | Hermes Agent tool-call (clean XML, no thinking block) |
+| `qwen3.8-27b-uncensored-oq4e-fp16-mtp:qwen3-8-27b-thinking` | ON | Home Assistant / Open WebUI general chat |
 
 ### Why
 
