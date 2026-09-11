@@ -122,6 +122,10 @@ Headless alternative: stop the service, flip `is_pinned` in `~/.omlx/model_setti
 
 The censored rollback at `/opt/models/qwen3.8-27b-4bit` is the safety net in case the uncensored primary underperforms on Hermes tool-call loops. Keep it on disk even when not pinned.
 
+**Hidden from clients (2026-09-11):** the rollback has `is_hidden: true` in `model_settings.json`, so it no longer appears on `/v1/models` (Hermes / Open WebUI pickers). While the primary is pinned, any client that selects the rollback gets **HTTP 507** — a pinned model is never evicted to make room, so the second 27B cannot load. Hiding removes the footgun; it does not prevent a direct request to the ID.
+
+To swap to the rollback: **unhide it first** (admin UI toggle, or `PUT /admin/api/models/qwen3.8-27b-4bit/settings` `{"is_hidden": false}`), then unpin the primary and pin the rollback. Re-hide it when swapping back.
+
 ---
 
 ## Profile management

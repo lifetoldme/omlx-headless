@@ -170,6 +170,8 @@ Settings are persisted to `~/.omlx/settings.json` and can be edited via the admi
 
 The censored 4-bit stays on disk as the safety net. If the uncensored primary underperforms on Hermes tool-call loops or breaks client expectations, unpin it and pin `qwen3.8-27b-4bit` via the oMLX admin panel (or `is_pinned` in `~/.omlx/model_settings.json`). No re-download needed.
 
+> **The rollback is hidden from clients** (`is_hidden: true`, 2026-09-11): it does not appear on `/v1/models`, because while the primary is pinned a client that selects it gets HTTP 507 (the pinned model cannot be evicted to free 15.7GB). To swap, unhide it first (`PUT /admin/api/models/qwen3.8-27b-4bit/settings` `{"is_hidden": false}` or the admin toggle), then unpin/pin. Re-hide when swapping back.
+
 ### Swapping models
 
 1. Open the admin UI over SSH tunnel (see [Configure model profiles](#configure-model-profiles-via-admin-ui)).
@@ -256,6 +258,8 @@ hermes config set model.default qwen3.8-27b-uncensored-oq4e-fp16-mtp:qwen3-8-27b
 ```
 
 > **Use the model alias/profile name, not the local path.** oMLX advertises model IDs (aliases or directory names) on `/v1/models`, not on-disk paths like the old `mlx_lm.server` did. Check `curl http://localhost:8000/v1/models` for the exact IDs to use.
+
+> **Fallback provider:** `fallback_providers` must point at the same tool profile (`qwen3.8-27b-uncensored-oq4e-fp16-mtp:qwen3-8-27b-tool`). A fallback to the rollback model can never load while the primary is pinned — the client gets HTTP 507 and the turn fails.
 
 ### Context length requirement
 
