@@ -231,7 +231,7 @@ Hermes requires ≥64K advertised, so never leave it below 65536.
 **Rollback assets (2026-09-11):**
 
 - Configs: `~/.omlx/{model_settings,model_profiles,settings}.json.bak-upgrade-20260911-145625`
-- oMLX 0.6.0rc1 wheel: `/tmp/omlx-0.6.0rc1-cp311.whl` (sha256 `632fe4df…`, matches the v0.6.0rc1 release asset)
+- oMLX 0.6.0rc1 wheel: `~/.omlx/rollback/omlx-0.6.0rc1-cp311.whl` (sha256 `632fe4df…`, matches the v0.6.0rc1 release asset)
 
 **Next lever if ~50K is insufficient:** enable TurboQuant KV
 (`turboquant_kv_enabled: true`, 4-bit, `skip_last: true`) — cuts KV ~75% —
