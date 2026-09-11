@@ -145,7 +145,8 @@ Settings are persisted to `~/.omlx/settings.json` and can be edited via the admi
 | Model dir | `/opt/models` | oMLX auto-discovers MLX model subdirectories |
 | Host | `0.0.0.0` | Bind to all interfaces for LAN access |
 | Port | `8000` | Default oMLX port |
-| Memory guard | `balanced` (default) | Adjust via `--memory-guard safe` or `--memory-guard-gb <N>` |
+| Memory guard | `custom` / 30 GB ceiling (since 2026-08-22) | Both kernel + oMLX knobs needed — see [Metal wired-memory limit](#metal-wired-memory-limit-prefill-guard-rejections) |
+| Chunked prefill | `true` (since 2026-09-11) | `scheduler.chunked_prefill` in `~/.omlx/settings.json`; long prompts are throttled instead of rejected |
 
 ### Primary model
 
@@ -158,7 +159,7 @@ Settings are persisted to `~/.omlx/settings.json` and can be edited via the admi
 | Tool-call | Qwen3.5-series XML `<function=...>` format — verified working (Hermes `<hermes>` XML confirmed) |
 | Thinking | ON by default; `enable_thinking` + `reasoning_effort` (xhigh/medium/low) supported |
 | Lightning MTP | `vlm_mtp_enabled: true` (opt-in per model settings; `mtp_enabled` is mutually exclusive) |
-| oMLX requirement | >= 0.6.0rc1 |
+| oMLX requirement | >= 0.6.4 (current, since 2026-09-11) |
 
 ### Fallback / rollback models
 
@@ -397,20 +398,44 @@ Then restart: `brew services restart omlx`.
 
 The 27B model at 4-bit (~16.9GB weights) plus KV cache plus macOS overhead sits near the 32GB ceiling under concurrent HA + Hermes load. Mitigations:
 
-- In the oMLX admin panel, set a memory guard: `--memory-guard safe` or `--memory-guard-gb 24`
-- Enable SSD KV cache: `--paged-ssd-cache-dir ~/.omlx/cache` (offloads cold KV blocks to disk)
-- Reduce max concurrent requests: `--max-concurrent-requests 4` (default is 8)
+- Memory guard is already raised to `custom` / 30 GB (see [Metal wired-memory limit](#metal-wired-memory-limit-prefill-guard-rejections)); lower it only if the box destabilizes
+- SSD KV cache is enabled (`~/.omlx/cache`, 46 GB cap)
+- Max concurrent requests: 4
 - Drop to a smaller model if sustained swap is observed
+
+### Prefill guard behavior and practical context ceiling (2026-09-11)
+
+oMLX was upgraded `0.6.0rc1` → **`0.6.4`** and `scheduler.chunked_prefill` set to
+`true`. Effect on this 32GB box with the 27B primary:
+
+- Long requests are no longer rejected at admission. The scheduler throttles the
+  chunked prefill, reclaims pooled Metal buffers (observed 2.1 GB + 1.8 GB) and
+  evicts idle helper models (bge-m3, 305 MB) before failing. A hard 400 only
+  happens when even a minimum chunk cannot fit.
+- A 19.5K-token prompt — the size class that failed on 2026-09-09 — now completes.
+- Measured single-prompt admission boundary: **49,152 tokens verified**; the
+  65,536 attempt failed mid-prefill at 56,288 tokens (26.88 GB + 1.66 GB
+  transient vs the 28.5 GB prefill safety cap = 95% of the 30 GB ceiling).
+  Treat **~50K as the practical single-prompt ceiling** on 32GB.
+- Throughput is unchanged vs 0.6.0rc1 (batch 1, 128 gen tokens): PP 114.9 / 111.6
+  tok/s and TG 17.2 / 16.1 tok/s at 8K / 16K; peak system memory slightly lower
+  (25.8 / 27.7 GB).
+- **Gotcha:** the admin context benchmark *applies* the verified boundary to the
+  model's `max_context_window` (it wrote 49152). Revert with
+  `PUT /admin/api/models/<model-id>/settings` `{"max_context_window": 65536}` —
+  Hermes requires ≥64K advertised context.
+- TurboQuant KV was deliberately left disabled; it is the next lever if ~50K
+  proves insufficient.
 
 ### Metal wired-memory limit (prefill guard rejections)
 
 When oMLX rejects prompts with `prefill_memory_exceeded` / pre-chunk guard errors (empty or timed-out completions, litellm gateways failing), the Metal ceiling is too tight: with the kernel default the Metal cap on 32GB is ~24.96GB and oMLX's guard ceiling sits at ~23.7GB. Raise the kernel cap:
 
 ```bash
-sudo sysctl -w iogpu.wired_limit_mb=28672
+sudo sysctl -w iogpu.wired_limit_mb=30720
 ```
 
-This is runtime-only and resets on reboot. `sudo nvram boot-args="iogpu.wired_limit_mb=28672"` is **SIP-blocked** on Apple Silicon — persist with a root LaunchDaemon instead (installed on this box as `com.beaty.wired-limit`):
+This is runtime-only and resets on reboot. `sudo nvram boot-args="iogpu.wired_limit_mb=30720"` is **SIP-blocked** on Apple Silicon — persist with a root LaunchDaemon instead (installed on this box as `com.beaty.wired-limit`):
 
 ```xml
 <!-- /Library/LaunchDaemons/com.beaty.wired-limit.plist -->
@@ -424,7 +449,7 @@ This is runtime-only and resets on reboot. `sudo nvram boot-args="iogpu.wired_li
     <array>
         <string>/usr/sbin/sysctl</string>
         <string>-w</string>
-        <string>iogpu.wired_limit_mb=28672</string>
+        <string>iogpu.wired_limit_mb=30720</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -436,10 +461,10 @@ This is runtime-only and resets on reboot. `sudo nvram boot-args="iogpu.wired_li
 sudo cp <plist> /Library/LaunchDaemons/com.beaty.wired-limit.plist
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.beaty.wired-limit.plist
 # verify after a reboot:
-sysctl -n iogpu.wired_limit_mb   # -> 28672
+sysctl -n iogpu.wired_limit_mb   # -> 30720
 ```
 
-If you raise the limit later, update the plist value too. If the box still runs hot at 28GB, harden further in the admin panel: Memory Guard `aggressive` (`--memory-guard aggressive`) or a custom `--memory-guard-gb 26`, plus the SSD KV cache and lower concurrency above.
+The kernel cap alone is **not enough**: oMLX's process memory enforcer derives its ceiling from `memory_guard_tier` (aggressive tier caps at 87.5% of RAM = 28GB on 32GB). To actually use the raised cap, also set the oMLX side (live-applied, no restart): Memory Guard tier `custom` + custom ceiling `30.0` GB in the admin panel, or `POST /admin/api/global-settings` with `{"memory_guard_tier":"custom","memory_guard_custom_ceiling_gb":30.0}`. If the box runs hot, fall back to `aggressive` (28GB ceiling) or lower the custom ceiling.
 
 ### oMLX `--host` flag not recognized
 

@@ -97,7 +97,7 @@ Models live in `/opt/models/<name>`. oMLX auto-discovers MLX-format model subdir
 
 The Qwen3.6 fallbacks (`qwen3.6-27b-optiq`, `qwen3.6-27b-heretic2-uncensored`) are no longer on disk as of 2026-08-22. If a Hermes tool-call regression appears on the uncensored primary, either download `mlx-community/Qwen3.6-27B-OptiQ-4bit` fresh or unpin back to `qwen3.8-27b-4bit`.
 
-Qwen3.8 requires oMLX >= 0.6.0rc1 (Qwen3.5-family compatibility path). Keep oMLX current via `scripts/update.sh --omlx`.
+Qwen3.8 requires oMLX >= 0.6.0rc1 (Qwen3.5-family compatibility path); the box runs **0.6.4** since 2026-09-11. Keep oMLX current via `scripts/update.sh --omlx`.
 
 Note: `mtp_enabled` and `vlm_mtp_enabled` are mutually exclusive in `model_settings.json` — oMLX rejects the settings entry if both are true. For the VLM primary, only `vlm_mtp_enabled: true` is set.
 
@@ -166,6 +166,76 @@ sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock "$OMLX_BIN"
 ```
 
 `update.sh --omlx` does this automatically. If you upgrade omlx manually, run the above or `./scripts/update.sh --omlx`.
+
+---
+
+## Wired memory limit (iogpu.wired_limit_mb)
+
+Apple Silicon caps how much unified memory Metal can wire. oMLX's process memory enforcer computes its ceiling as `min(static, dynamic, metal_cap)` where `metal_cap` comes from this sysctl. **Two knobs must both be raised** — the kernel sysctl alone does nothing because oMLX's static ceiling (tier-dependent) still caps at 28GB (aggressive tier = 87.5% of 32GB).
+
+**Current state (raised to 30GB on 2026-08-22):**
+
+- Kernel: `iogpu.wired_limit_mb = 30720` — set at runtime via `sudo sysctl -w iogpu.wired_limit_mb=30720`
+- Persistence: root LaunchDaemon `/Library/LaunchDaemons/com.beaty.wired-limit.plist` runs that sysctl at boot (nvram boot-args route is SIP-blocked)
+- oMLX: `~/.omlx/settings.json` → `memory_guard_tier: "custom"`, `memory_guard_custom_ceiling_gb: 30.0` (live-applied via `POST /admin/api/global-settings`, no restart needed)
+
+**To change the limit:**
+
+1. `sudo sysctl -w iogpu.wired_limit_mb=<MB>` (immediate)
+2. Update the value in the LaunchDaemon plist, then `sudo launchctl unload /Library/LaunchDaemons/com.beaty.wired-limit.plist && sudo launchctl load -w /Library/LaunchDaemons/com.beaty.wired-limit.plist`
+3. Match it in oMLX: set `memory_guard_tier: "custom"` + `memory_guard_custom_ceiling_gb` (or via admin UI Memory Guard settings)
+
+**Rollback if the box destabilizes** (30GB = 93.75% of 32GB, ~2GB left for macOS):
+
+```bash
+sudo sysctl -w iogpu.wired_limit_mb=28672   # revert plist value too
+# and in oMLX: memory_guard_tier: "aggressive" (ceiling drops back to 28GB)
+```
+
+Verify: `sysctl iogpu.wired_limit_mb` and the enforcer startup line in `~/.omlx/logs/server.log` (`ceiling=…`).
+
+---
+
+## Prefill memory guard: chunked prefill + context ceiling (2026-09-11)
+
+`0.6.0rc1 → 0.6.4` upgrade plus `~/.omlx/settings.json` →
+`scheduler.chunked_prefill: true` (service stopped for the edit, then started).
+
+**Observed behavior (32GB, 27B primary):**
+
+- Requests are admitted and the scheduler throttles the chunked prefill instead
+  of rejecting at admission: log lines `adaptive_prefill_throttle` →
+  `Reclaimed N GB of pooled Metal buffers` → optional `Evicting idle model
+  'bge-m3'` → continue. Hard 400 (`prefill_memory_exceeded`) only when even a
+  minimum chunk cannot fit.
+- A 19.5K-token prompt (the size class that failed 2026-09-09) now completes.
+- Measured single-prompt boundary: **49,152 tokens verified**; 65,536 failed
+  mid-prefill at 56,288 tokens (26.88GB + 1.66GB transient vs the 28.5GB safety
+  cap). Practical single-prompt ceiling ≈ **50K tokens**.
+- No throughput regression vs 0.6.0rc1 (PP 114.9/111.6, TG 17.2/16.1 tok/s at
+  8K/16K); peak system memory slightly lower.
+- Guard failures can be state-dependent: a 32K bench test failed at 28,672
+  tokens right after 8K+16K runs, while a fresh engine admitted ~56K.
+
+**Admin context benchmark gotcha:** `POST /admin/api/bench/context/start` with
+`target_tokens` *applies* the verified boundary to the model's
+`max_context_window` when it completes. Revert (live, no restart):
+
+```bash
+curl -X PUT http://127.0.0.1:8000/admin/api/models/<model-id>/settings \
+  -H 'Content-Type: application/json' -d '{"max_context_window": 65536}'
+```
+
+Hermes requires ≥64K advertised, so never leave it below 65536.
+
+**Rollback assets (2026-09-11):**
+
+- Configs: `~/.omlx/{model_settings,model_profiles,settings}.json.bak-upgrade-20260911-145625`
+- oMLX 0.6.0rc1 wheel: `/tmp/omlx-0.6.0rc1-cp311.whl` (sha256 `632fe4df…`, matches the v0.6.0rc1 release asset)
+
+**Next lever if ~50K is insufficient:** enable TurboQuant KV
+(`turboquant_kv_enabled: true`, 4-bit, `skip_last: true`) — cuts KV ~75% —
+or swap to the non-fp16 oQ4e variant (~0.9GB smaller).
 
 ---
 
