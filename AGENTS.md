@@ -243,6 +243,35 @@ or swap to the non-fp16 oQ4e variant (~0.9GB smaller).
 
 ---
 
+## Embedding memory cap (2026-09-17)
+
+`bge-m3` carries `max_context_window: 2048` in `~/.omlx/model_settings.json`
+(set live via `PUT /admin/api/models/bge-m3/settings {"max_context_window": 2048}`;
+survives restarts — verified 2026-09-17 19:08 EDT). Why:
+
+- The embedding forward pass materializes attention per input; buffers scale
+  ~seq² × heads. At the model-native 8,194 tokens a full 32-input sub-batch
+  (`scheduler.embedding_batch_size: 32`) needs ≈68 GB of attention
+  (~2.14 GB per input), and even a 10-input mixed batch padded to 8,194 needs
+  ~21 GB — unreachable on 32 GB.
+- 2026-09-17: the Hermes vault re-index pushed pooled Metal buffers to 33 GB →
+  hard pressure → bge-m3 evicted → `507 Cannot load bge-m3` (a reload would
+  push past the 30 GB ceiling with the pinned 27B resident at 17.4 GB).
+- With the 2,048 cap the worst-case 32-input batch peaks the pool at ~9 GB and
+  drains; the enforcer's "deferring destructive enforcement" lets the in-flight
+  batch finish. Verified: 4 × 32 inputs × ~4K tokens → all HTTP 200, no
+  evictions, ~18 s/batch; a post-restart long input logs `max_length=2048`.
+
+Consumers' chunks sit far under 2,048 tokens (vault ≤2,200 chars ≈ 700 tokens;
+Open WebUI ~1K chars), so recall is unaffected. Clients can still override per
+request with `max_length`.
+
+Next levers if pressure returns: `scheduler.embedding_batch_size` 32 → 16/8
+(halves/quarters the per-batch peak; costs throughput), or lower the cap.
+Do not raise the memory ceiling — 30 GB is 93.75% of RAM.
+
+---
+
 ## Verification commands
 
 Quick health check from the Mac Studio over SSH:

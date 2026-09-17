@@ -147,6 +147,7 @@ Settings are persisted to `~/.omlx/settings.json` and can be edited via the admi
 | Port | `8000` | Default oMLX port |
 | Memory guard | `custom` / 30 GB ceiling (since 2026-08-22) | Both kernel + oMLX knobs needed — see [Metal wired-memory limit](#metal-wired-memory-limit-prefill-guard-rejections) |
 | Chunked prefill | `true` (since 2026-09-11) | `scheduler.chunked_prefill` in `~/.omlx/settings.json`; long prompts are throttled instead of rejected |
+| Embedding cap | `bge-m3` `max_context_window: 2048` (since 2026-09-17) | Per-model override in `model_settings.json`; bounds the worst-case embedding batch to ~9 GB pooled (was 33 GB → evictions/507s) — see [Embedding memory cap](#embedding-memory-cap-2026-09-17) |
 
 ### Primary model
 
@@ -430,6 +431,20 @@ oMLX was upgraded `0.6.0rc1` → **`0.6.4`** and `scheduler.chunked_prefill` set
   Hermes requires ≥64K advertised context.
 - TurboQuant KV was deliberately left disabled; it is the next lever if ~50K
   proves insufficient.
+
+### Embedding memory cap (2026-09-17)
+
+`bge-m3` is capped at 2,048 tokens (`max_context_window` in
+`~/.omlx/model_settings.json`, set live via the admin API; persists across
+restarts). Embedding attention buffers are quadratic in sequence length: at the
+native 8,194-token limit a 32-input sub-batch needs ≈68 GB, and even a
+10-input batch padded to 8,194 needs ≈21 GB — the 2026-09-17 vault re-index
+grew the pool to 33 GB, evicted bge-m3, and returned `507` reload-refusals
+while the pinned 27B held 17.4 GB. At 2,048 tokens the worst-case batch peaks
+the pool at ~9 GB and drains (verified: 4 × 32 × ~4K-token synthetic batches,
+all 200, no evictions). All consumers' chunks are far smaller, so recall is
+unaffected; clients can override per request with `max_length`. Next levers:
+`embedding_batch_size` 32 → 16/8, or a lower cap.
 
 ### Metal wired-memory limit (prefill guard rejections)
 
