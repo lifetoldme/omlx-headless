@@ -13,11 +13,11 @@ macOS (headless, SSH-only — no Docker, no Colima)
 └── oMLX (brew service, auto-restart on crash, starts at boot)
     ├── Port 8000, bound to 0.0.0.0
     ├── Model dir: /opt/models
-    ├── Primary: qwen3.8-27b-uncensored-oq4e-fp16-mtp (VLM, oQ4e 4-bit, ~17GB, uncensored, Lightning VLM-MTP)
+    ├── Primary: qwen3.8-27b-uncensored-oq4e-fp16-mtp (VLM, oQ4e 4-bit, ~17GB, uncensored, Lightning MTP)
     ├── Rollback (on disk, swappable): qwen3.8-27b-4bit (censored base)
     ├── Profiles (zero extra RAM):
-    │   ├── qwen3.8-27b-uncensored-oq4e-fp16-mtp:qwen3-8-27b-tool      (thinking OFF — Hermes tool-call)
-    │   └── qwen3.8-27b-uncensored-oq4e-fp16-mtp:qwen3-8-27b-thinking  (thinking ON  — HA / Open WebUI chat)
+    │   ├── qwen3.8-27b-uncensored-oq4e-fp16-mtp:qwen3-8-27b-tool      (thinking OFF — Hermes tool-call; 0.7/0.80/20)
+    │   └── qwen3.8-27b-uncensored-oq4e-fp16-mtp:qwen3-8-27b-thinking  (thinking ON  — HA / Open WebUI chat; 1.0/0.95/20, effort=medium)
     └── Admin UI: :8000/admin  (SSH-tunneled from another machine)
 
 Clients (all on OTHER LAN hosts — nothing else runs on the Mac Studio):
@@ -159,7 +159,7 @@ Settings are persisted to `~/.omlx/settings.json` and can be edited via the admi
 | Base | orcarouter/Qwen3.8-27B-Uncensored (Qwen3.5-architecture hybrid: Gated DeltaNet + attention) |
 | Tool-call | Qwen3.5-series XML `<function=...>` format — verified working (Hermes `<hermes>` XML confirmed) |
 | Thinking | ON by default; `enable_thinking` + `reasoning_effort` (xhigh/medium/low) supported |
-| Lightning MTP | `vlm_mtp_enabled: true` (opt-in per model settings; `mtp_enabled` is mutually exclusive) |
+| Lightning MTP | `mtp_enabled: true` (native, uses the checkpoint's embedded MTP head). `vlm_mtp_enabled` needs an external `vlm_mtp_draft_model` and is mutually exclusive with native MTP and TurboQuant KV |
 | oMLX requirement | >= 0.6.4 (current, since 2026-09-11) |
 
 ### Fallback / rollback models
@@ -422,6 +422,11 @@ oMLX was upgraded `0.6.0rc1` → **`0.6.4`** and `scheduler.chunked_prefill` set
   65,536 attempt failed mid-prefill at 56,288 tokens (26.88 GB + 1.66 GB
   transient vs the 28.5 GB prefill safety cap = 95% of the 30 GB ceiling).
   Treat **~50K as the practical single-prompt ceiling** on 32GB.
+- **State dependence (2026-09-20):** a 55,195-token prompt completes on a fresh
+  engine (586 s, ~94 tok/s prefill) but the same prompt is rejected at 43–48K
+  tokens once the pooled Metal buffers have grown (~3 GB pool after a few large
+  requests). Restart the service for a clean long-context test; a warm pool is
+  the binding constraint, not the prompt length.
 - Throughput is unchanged vs 0.6.0rc1 (batch 1, 128 gen tokens): PP 114.9 / 111.6
   tok/s and TG 17.2 / 16.1 tok/s at 8K / 16K; peak system memory slightly lower
   (25.8 / 27.7 GB).
@@ -429,8 +434,11 @@ oMLX was upgraded `0.6.0rc1` → **`0.6.4`** and `scheduler.chunked_prefill` set
   model's `max_context_window` (it wrote 49152). Revert with
   `PUT /admin/api/models/<model-id>/settings` `{"max_context_window": 65536}` —
   Hermes requires ≥64K advertised context.
-- TurboQuant KV was deliberately left disabled; it is the next lever if ~50K
-  proves insufficient.
+- TurboQuant KV (4-bit, `skip_last`) was tested on 2026-09-20 and reverted:
+  with it enabled the same 55,195-token prompt completed on a fresh engine
+  (588.9 s vs 586.1 s without) and decode at 55K was not faster (10.8 vs
+  15.5 tok/s, MTP phase). It buys no context or speed on this box and adds KV
+  quantization risk. The guard, not KV size, is the ceiling.
 
 ### Embedding memory cap (2026-09-17)
 

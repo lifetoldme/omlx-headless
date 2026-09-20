@@ -99,7 +99,9 @@ The Qwen3.6 fallbacks (`qwen3.6-27b-optiq`, `qwen3.6-27b-heretic2-uncensored`) a
 
 Qwen3.8 requires oMLX >= 0.6.0rc1 (Qwen3.5-family compatibility path); the box runs **0.6.4** since 2026-09-11. Keep oMLX current via `scripts/update.sh --omlx`.
 
-Note: `mtp_enabled` and `vlm_mtp_enabled` are mutually exclusive in `model_settings.json` — oMLX rejects the settings entry if both are true. For the VLM primary, only `vlm_mtp_enabled: true` is set.
+Note: native MTP (`mtp_enabled: true`) and VLM MTP (`vlm_mtp_enabled: true`) are mutually exclusive in `model_settings.json` — oMLX rejects the settings entry if both are true. They are also exclusive with DFlash and, for `vlm_mtp_enabled`, with TurboQuant KV.
+
+**Native Lightning MTP is the correct toggle for this model (set 2026-09-20).** The checkpoint ships one embedded MTP layer (`text_config.mtp_num_hidden_layers = 1`, 29 `mtp.*` tensors), which native `mtp_enabled` uses directly. `vlm_mtp_enabled` requires an external drafter via `vlm_mtp_draft_model`; with that unset the toggle is silently inert. The 2026-08-22 swap had set only `vlm_mtp_enabled: true`, so MTP ran disabled until 2026-09-20. Verified active in the log (`Speculative backend selected … Lightning MTP`, `MTP[n] … accept=…`).
 
 ### Downloading a new model
 
@@ -143,10 +145,14 @@ Edit while the service is stopped (`brew services stop omlx`), then start. Profi
 
 ### Current profiles
 
-| Profile name | Thinking | Use case |
-|---|---|---|
-| `qwen3.8-27b-uncensored-oq4e-fp16-mtp:qwen3-8-27b-tool` | OFF | Hermes Agent tool-call (clean XML, no thinking block) |
-| `qwen3.8-27b-uncensored-oq4e-fp16-mtp:qwen3-8-27b-thinking` | ON | Home Assistant / Open WebUI general chat |
+| Profile name | Thinking | Sampling (defaults only) | Use case |
+|---|---|---|---|
+| `qwen3.8-27b-uncensored-oq4e-fp16-mtp:qwen3-8-27b-tool` | OFF | temp 0.7 / top_p 0.80 / top_k 20 | Hermes Agent tool-call (clean XML, no thinking block) |
+| `qwen3.8-27b-uncensored-oq4e-fp16-mtp:qwen3-8-27b-thinking` | ON, `reasoning_effort=medium` | temp 1.0 / top_p 0.95 / top_k 20 | Home Assistant / Open WebUI general chat |
+
+Samplers follow Qwen's published presets (thinking 1.0/0.95/20; non-thinking 0.7/0.80/20) as *defaults*: `force_sampling` stays false so client values win where they set them (HA sends temperature 0.6; Hermes auxiliary tasks send 0.1/0). The non-thinking `presence_penalty: 1.5` preset is deliberately omitted — Qwen warns it can degrade structured tool calls.
+
+The thinking profile carries `chat_template_kwargs: {"reasoning_effort": "medium"}` (no `forced_ct_kwargs`), so any client that omits the field gets `medium`; per-request `reasoning_effort` still overrides. Home Assistant's voice conversation subentry pins `reasoning_effort=low` via its own `chat_template_opts`.
 
 ### Why
 
@@ -237,9 +243,13 @@ Hermes requires ≥64K advertised, so never leave it below 65536.
 - Configs: `~/.omlx/{model_settings,model_profiles,settings}.json.bak-upgrade-20260911-145625`
 - oMLX 0.6.0rc1 wheel: `~/.omlx/rollback/omlx-0.6.0rc1-cp311.whl` (sha256 `632fe4df…`, matches the v0.6.0rc1 release asset)
 
-**Next lever if ~50K is insufficient:** enable TurboQuant KV
-(`turboquant_kv_enabled: true`, 4-bit, `skip_last: true`) — cuts KV ~75% —
-or swap to the non-fp16 oQ4e variant (~0.9GB smaller).
+**Next lever if ~50K is insufficient:** none found on this hardware. TurboQuant
+KV (4-bit, `skip_last: true`) was tested on 2026-09-20 and reverted — with it
+enabled a 55,195-token prompt completed on a fresh engine in 588.9s vs 586.1s
+without, and decode at 55K was *slower* (10.8 vs 15.5 tok/s in the MTP phase).
+The prefill guard, not KV size, is the ceiling. Remaining options are freeing
+system memory / restarting the service for a clean pool, or reducing client
+context (Hermes compression threshold).
 
 ---
 
@@ -269,6 +279,65 @@ request with `max_length`.
 Next levers if pressure returns: `scheduler.embedding_batch_size` 32 → 16/8
 (halves/quarters the per-batch peak; costs throughput), or lower the cap.
 Do not raise the memory ceiling — 30 GB is 93.75% of RAM.
+
+---
+
+## Tuning notes (2026-09-20)
+
+Applied on top of the 2026-08-22 VLM swap. Baseline: 16.9 TG at short context
+(no MTP), global samplers 1.0/0.95/0 (top_k off), template default `xhigh`
+reasoning, TurboQuant off.
+
+### Native MTP
+
+`vlm_mtp_enabled: true` → `mtp_enabled: true` on the base model **and both
+profiles** — profile model-specific fields override the base at engine
+construction, so all three must agree or profile requests reload a non-MTP
+variant. The engine auto-reloads on the next request. Measured 300-token
+decode: 16.9 → 18.8 tok/s (+8–11%), accept 99.5–100%, ~3.5 tok/cycle, adaptive
+depth 1–3. The gain is below the 20–30% seen on other chips because the 48
+Gated DeltaNet layers serialise multi-token verify (a 4-token verify costs
+~2.65x a single-token step). Community M1 Max rows at 8K report 22–24 TG.
+
+### Reasoning effort
+
+oMLX 0.6.4 forwards a top-level `reasoning_effort` into
+`chat_template_kwargs`; the model template defaults to `xhigh` and accepts only
+`xhigh`/`medium`/`low`. Forwarding is provable from `usage.prompt_tokens`: the
+template injects an effort instruction for xhigh/low and none for medium
+(83/41/71 tokens for the same prompt).
+
+Thinking profile, routine itinerary prompt (max 3000): xhigh 2016 tok/116.8s,
+medium 2014 tok/116.4s, low 1535 tok/89.9s. On a hard architecture prompt both
+xhigh and medium hit a 4000-token budget before finishing, so medium is a
+default, not a guarantee. Defaults: thinking profile `medium`, HA voice `low`.
+
+### Samplers
+
+Official Qwen presets as profile defaults with `force_sampling: false`, so
+client values still win (HA temperature 0.6, Hermes auxiliary 0.1/0).
+Tool-call smoke test after the change: clean `tool_calls`, correct JSON
+arguments.
+
+---
+
+## Benchmarking checklist
+
+Use when measuring any change on this box:
+
+1. Name the exact model file and quant (oQ4e-fp16-mtp, not "4-bit").
+2. Set reasoning effort explicitly and verify it is forwarded (compare
+   `usage.prompt_tokens`; effort changes the rendered prompt).
+3. Record the context length at measurement time, not the allocation.
+4. Separate prefill, decode, TTFT, total wall time, and tokens generated.
+5. Run MTP off and on with the same prompt/context; record acceptance rate
+   (log: `MTP[n] … accept=…`).
+6. Test at least two context depths (8K and 64K if that is the real workflow).
+7. Verify multi-turn tool use, not just one-shot completion.
+8. Repeat the task; single samples swing widely at temperature 1.0.
+9. Watch memory pressure and swap (`vm_stat`, `sysctl vm.swapusage`); the
+   prefill guard is state-dependent — restart the service for a clean pool.
+10. Judge completed work per hour, not tokens per second in isolation.
 
 ---
 
