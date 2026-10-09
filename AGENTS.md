@@ -43,9 +43,45 @@ brew services info omlx       # Check status
 
 ---
 
+## API key auth (0.7.0+)
+
+0.7.0 refuses to bind a non-loopback host (`0.0.0.0`) without a real API key,
+and `auth.skip_api_key_verification: true` is itself an error. The failure mode
+is quiet: under launchd there is no TTY for the confirmation prompt, so
+`brew services start` repeats `Startup canceled. Settings have not been changed.`
+in `$(brew --prefix)/var/log/omlx.log` and the API never comes up.
+
+Current settings in `~/.omlx/settings.json` (applied 2026-10-09):
+
+| Key | Value | Purpose |
+|---|---|---|
+| `auth.api_key` | management key (file is 0600) | Admin API + dashboard login |
+| `auth.skip_api_key_verification` | `false` | Required with a non-loopback bind |
+| `auth.allow_unauthenticated_inference` | `true` | Keeps the `/v1` inference surface keyless |
+| `server.host` | `0.0.0.0` | Unchanged |
+
+Effect:
+
+- **Inference stays keyless on the LAN** — `/v1/chat/completions`,
+  `/v1/completions`, `/v1/embeddings`, `/v1/rerank`, `/v1/models`, `/v1/audio`.
+  Hermes, Home Assistant, Open WebUI and the Netdata httpcheck need no change.
+- **Management needs the key** — `/v1/models/status`, `/admin/api/*`, and the
+  `/admin` dashboard login (`POST /api/login`) accept only the key, sent as
+  `Authorization: Bearer <key>` or `x-api-key: <key>`. The dashboard login form
+  takes the same key.
+
+Load the key into a shell variable instead of pasting it:
+
+```bash
+KEY=$(python3 -c 'import json,pathlib;print(json.load(open(pathlib.Path.home()/".omlx/settings.json"))["auth"]["api_key"])')
+curl -s -H "Authorization: Bearer $KEY" http://127.0.0.1:8000/v1/models/status
+```
+
+---
+
 ## Admin UI over SSH tunnel
 
-The oMLX admin dashboard is at `:8000/admin` on the Mac Studio. Since the Mac is headless, you tunnel to it from another machine and open it in your local browser:
+The oMLX admin dashboard is at `:8000/admin` on the Mac Studio. Since the Mac is headless, you tunnel to it from another machine and open it in your local browser (on 0.7.0 the login form takes the management API key — see [API key auth](#api-key-auth-070)):
 
 ```bash
 # On your laptop / another LAN machine:
@@ -97,7 +133,7 @@ Models live in `/opt/models/<name>`. oMLX auto-discovers MLX-format model subdir
 
 The Qwen3.6 fallbacks (`qwen3.6-27b-optiq`, `qwen3.6-27b-heretic2-uncensored`) are no longer on disk as of 2026-08-22. If a Hermes tool-call regression appears on the uncensored primary, either download `mlx-community/Qwen3.6-27B-OptiQ-4bit` fresh or unpin back to `qwen3.8-27b-4bit`.
 
-Qwen3.8 requires oMLX >= 0.6.0rc1 (Qwen3.5-family compatibility path); the box runs **0.6.4** since 2026-09-11. Keep oMLX current via `scripts/update.sh --omlx`.
+Qwen3.8 requires oMLX >= 0.6.0rc1 (Qwen3.5-family compatibility path); the box runs **0.7.0** since 2026-10-09 (0.6.4 from 2026-09-11). Keep oMLX current via `scripts/update.sh --omlx` — after 0.7.0 the service needs the API key settings below before it will bind `0.0.0.0`.
 
 Note: native MTP (`mtp_enabled: true`) and VLM MTP (`vlm_mtp_enabled: true`) are mutually exclusive in `model_settings.json` — oMLX rejects the settings entry if both are true. They are also exclusive with DFlash and, for `vlm_mtp_enabled`, with TurboQuant KV.
 
@@ -253,6 +289,42 @@ context (Hermes compression threshold).
 
 ---
 
+## oMLX 0.7.0 upgrade (2026-10-09)
+
+`brew upgrade` 0.6.4 → 0.7.0, about 4 minutes including dependencies; the API was
+down 09:23–09:31 EDT. The upgrade surfaced the 0.7.0 auth gate (see
+[API key auth](#api-key-auth-070)) — the service would not bind `0.0.0.0` until
+`auth.api_key` was set, `skip_api_key_verification` false, and
+`allow_unauthenticated_inference` true.
+
+Behavior verified on this box:
+
+- **Rebuilt memory guard.** An 8K counting prefill that needed headroom logged
+  `adaptive_prefill_throttle`, evicted idle bge-m3, and completed — no 400s.
+  Startup confirms `Process memory enforcer started (tier=custom,
+  ceiling=30.0GB, interval=1.0s)`.
+- **Exact Lightning MTP.** Upstream #4023 makes MTP verify rows bit-identical
+  to serial decode; the old greedy temp-0 variation (#4214) does not reproduce:
+  3/3 identical runs. Adaptive draft depth now reaches d4 (0.6.4 topped out
+  at d3).
+- **Throughput** (batch 1, temperature 0, uncached prefill, prose generations
+  of ~200 tokens): PP 113.9 / 108.7 and TG 18.0 / 15.9 tok/s at 8K / 16K,
+  parity with the 0.6.4 baseline (114.9 / 111.6, 17.2 / 16.1). On a numeric-list
+  task MTP accepted 98.4% (tok/cycle 4.65) and TG reached 31.8 / 30.6 tok/s, so
+  the upside is real when drafts land.
+- **Verification battery:** tool profile returns `finish_reason=tool_calls`
+  with clean JSON; `reasoning_effort` still changes `usage.prompt_tokens`
+  (xhigh/medium/low = 59/17/47); base64 data-URI vision answers "Red and blue.";
+  bge-m3 returns 1024-dim embeddings; `/v1/models` lists the same 5 IDs at
+  2048/40960/65536 context.
+
+**Rollback assets (2026-10-09):**
+
+- Configs: `~/.omlx/{settings,model_settings,model_profiles}.json.bak-upgrade-20261009-092235`
+- oMLX 0.6.4 wheel: `~/.omlx/rollback/omlx-0.6.4-cp311-cp311-macosx_15_0_universal2.whl` (sha256 `26213a39…`, matches the v0.6.4 release asset)
+
+---
+
 ## Embedding memory cap (2026-09-17)
 
 `bge-m3` carries `max_context_window: 2048` in `~/.omlx/model_settings.json`
@@ -376,7 +448,7 @@ curl -s http://<MAC_STUDIO_IP>:8000/v1/models | python3 -m json.tool
 | Property | Value |
 |---|---|
 | Base URL | `http://<MAC_STUDIO_IP>:8000/v1` |
-| API key | (none — unauthenticated, trusted home LAN) |
+| API key | Inference: none (`allow_unauthenticated_inference: true`). Management/admin: `auth.api_key` from `~/.omlx/settings.json` (Bearer or `x-api-key`); dashboard login uses the same key |
 | Endpoints | `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`, `/v1/rerank` |
 | Model field | Use the model ID or profile name from `/v1/models` (not the on-disk path) |
 

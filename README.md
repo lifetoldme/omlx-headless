@@ -95,19 +95,35 @@ In the admin panel:
    - `qwen3.8-27b:tool` — chat template kwargs `{"enable_thinking": false}` (for Hermes tool-call)
    - `qwen3.8-27b:thinking` — default kwargs (thinking ON, for general chat)
 3. **Expose both profiles as models** (toggle "Expose as model" on each) so they appear on `/v1/models`.
-4. **Disable API key auth** if you want unauthenticated LAN access (see [API key warning](#api-key-warning-on-first-connect) below).
+4. **Keep API key auth on** — 0.7.0 requires it for any non-loopback bind; see [API key and remote access](#api-key-and-remote-access) below.
 
 > **Why profiles?** Hermes tool-call needs thinking OFF (a thinking block can consume the token budget before a tool call is emitted). General chat benefits from thinking ON. Profiles let one loaded model serve both use cases without a second model in memory.
 
-#### API key warning on first connect
+#### API key and remote access
 
-The oMLX admin panel **generates and requires an API key on first connect** — clients calling `/v1/models` or `/v1/chat/completions` without it get `{"error":{"message":"API key required"}}`. If you want the unauthenticated trusted-home-LAN setup this repo documents, disable it after first connect:
+0.7.0 requires a real `auth.api_key` for any non-loopback bind (`0.0.0.0`), and
+`auth.skip_api_key_verification: true` is rejected outright. If either is wrong
+the launchd service loops on `Startup canceled. Settings have not been changed.`
+in `$(brew --prefix)/var/log/omlx.log` and the API never comes up.
 
-- In the admin panel: **Settings → Auth → skip API key verification** (toggle on), then clear the `api_key` field.
-- Or edit `~/.omlx/settings.json` directly: set `auth.skip_api_key_verification` to `true` and `auth.api_key` to `""`.
+The supported config here keeps the key for management and opens inference to
+the LAN:
+
+- `~/.omlx/settings.json` → `auth.api_key` set, `auth.skip_api_key_verification: false`,
+  `auth.allow_unauthenticated_inference: true`
 - Then: `brew services restart omlx`
 
-If you prefer to keep the API key, point each client (HA, Open WebUI, Hermes) at the key instead. The endpoint contract in [AGENTS.md](AGENTS.md) assumes unauthenticated — update it if you keep the key.
+With `allow_unauthenticated_inference` on, `/v1/chat/completions`,
+`/v1/embeddings`, `/v1/rerank` and `/v1/models` stay keyless, so Hermes, Home
+Assistant, Open WebUI and the Netdata httpcheck need no change. Management
+(`/admin`, `/admin/api/*`, `/v1/models/status`) requires the key, sent as
+`Authorization: Bearer <key>` or `x-api-key: <key>`; the dashboard login form
+takes the same key. Read it out of `~/.omlx/settings.json` when needed; the file
+is mode 0600, so keep it off the wire.
+
+To lock down inference too, leave `allow_unauthenticated_inference` false and
+give each client the key. Turning it off later is a client-side migration, not a
+server switch: every consumer has to send the header first.
 
 ### 4. Verify
 
@@ -160,7 +176,7 @@ Settings are persisted to `~/.omlx/settings.json` and can be edited via the admi
 | Tool-call | Qwen3.5-series XML `<function=...>` format — verified working (Hermes `<hermes>` XML confirmed) |
 | Thinking | ON by default; `enable_thinking` + `reasoning_effort` (xhigh/medium/low) supported |
 | Lightning MTP | `mtp_enabled: true` (native, uses the checkpoint's embedded MTP head). `vlm_mtp_enabled` needs an external `vlm_mtp_draft_model` and is mutually exclusive with native MTP and TurboQuant KV |
-| oMLX requirement | >= 0.6.4 (current, since 2026-09-11) |
+| oMLX requirement | >= 0.6.4; box runs **0.7.0** since 2026-10-09 (0.7.0 needs the [API key settings](#api-key-and-remote-access) before it will bind `0.0.0.0`) |
 
 ### Fallback / rollback models
 
@@ -246,7 +262,7 @@ source ~/.zshrc
 hermes model
 # → Select "Custom endpoint (self-hosted / VLLM / etc.)"
 # → API base URL:  http://<MAC_STUDIO_IP>:8000/v1
-# → API key:       (leave blank — local server needs none)
+# → API key:       (leave blank — inference is keyless via allow_unauthenticated_inference)
 # → Model name:    qwen3.8-27b-uncensored-oq4e-fp16-mtp:qwen3-8-27b-tool
 ```
 
@@ -440,6 +456,26 @@ oMLX was upgraded `0.6.0rc1` → **`0.6.4`** and `scheduler.chunked_prefill` set
   15.5 tok/s, MTP phase). It buys no context or speed on this box and adds KV
   quantization risk. The guard, not KV size, is the ceiling.
 
+### oMLX 0.7.0 (2026-10-09)
+
+`brew upgrade` 0.6.4 → 0.7.0. One breaking change: a non-loopback bind now
+requires a real `auth.api_key` and rejects `skip_api_key_verification` — see
+[API key and remote access](#api-key-and-remote-access). Applied here: key set,
+skip off, `allow_unauthenticated_inference: true`; the `/v1` surface stays
+keyless for LAN clients, only management needs the key.
+
+- **Throughput** (batch 1, temp 0, uncached prefill, ~200-token prose):
+  PP 113.9 / 108.7, TG 18.0 / 15.9 tok/s at 8K / 16K — parity with 0.6.4
+  (114.9 / 111.6, 17.2 / 16.1). A numeric-list task hit 98.4% MTP acceptance
+  and 31.8 / 30.6 tok/s, so highly draftable output is much faster.
+- **MTP determinism:** greedy temp-0 output is stable with MTP on (upstream
+  #4023); the 0.6.x variation (#4214) did not reproduce across 3 runs.
+- **Guard:** same shape as 0.6.4 — throttle, reclaim, evict idle helpers
+  (bge-m3), then continue. `ceiling=30.0GB` confirmed at startup.
+- Rollback assets: configs `~/.omlx/*.json.bak-upgrade-20261009-092235`; 0.6.4
+  wheel `~/.omlx/rollback/omlx-0.6.4-cp311-cp311-macosx_15_0_universal2.whl`
+  (sha256 `26213a39…`).
+
 ### Embedding memory cap (2026-09-17)
 
 `bge-m3` is capped at 2,048 tokens (`max_context_window` in
@@ -491,7 +527,7 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.beaty.wired-limit.pli
 sysctl -n iogpu.wired_limit_mb   # -> 30720
 ```
 
-The kernel cap alone is **not enough**: oMLX's process memory enforcer derives its ceiling from `memory_guard_tier` (aggressive tier caps at 87.5% of RAM = 28GB on 32GB). To actually use the raised cap, also set the oMLX side (live-applied, no restart): Memory Guard tier `custom` + custom ceiling `30.0` GB in the admin panel, or `POST /admin/api/global-settings` with `{"memory_guard_tier":"custom","memory_guard_custom_ceiling_gb":30.0}`. If the box runs hot, fall back to `aggressive` (28GB ceiling) or lower the custom ceiling.
+The kernel cap alone is **not enough**: oMLX's process memory enforcer derives its ceiling from `memory_guard_tier` (aggressive tier caps at 87.5% of RAM = 28GB on 32GB). To actually use the raised cap, also set the oMLX side (live-applied, no restart): Memory Guard tier `custom` + custom ceiling `30.0` GB in the admin panel, or `POST /admin/api/global-settings` with `{"memory_guard_tier":"custom","memory_guard_custom_ceiling_gb":30.0}` (0.7.0: send the management key as `Authorization: Bearer <key>` or the admin API returns 401). If the box runs hot, fall back to `aggressive` (28GB ceiling) or lower the custom ceiling.
 
 ### oMLX `--host` flag not recognized
 
