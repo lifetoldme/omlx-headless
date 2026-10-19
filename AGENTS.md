@@ -369,8 +369,9 @@ The source is `~/.omlx/usage.sqlite3`, which starts at the 0.7.0 upgrade
 
 - Hermes: requests `include_usage`; the local primary is the thinking-off tool
   profile.
-- Home Assistant: requests `include_usage`; its date/time note goes before the
-  last user message, not at the front of the prefix.
+- Home Assistant: requests `include_usage`; when its date/time injection is
+  enabled, the note goes before the last user message, not at the front of the
+  prefix.
 - Open WebUI: the RAG template changes the prompt after the stable system block,
   so only the pre-context prefix caches. Do not move RAG context ahead of the
   user query.

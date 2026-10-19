@@ -383,7 +383,7 @@ The log confirms the restore: `Prefix cache restore ... cached=9251 suffix=7 blo
 ./scripts/cache-report.sh local-llm 7     # 7 days
 ```
 
-The report prints a daily summary, the largest cache-miss hours (at least 5K prompt tokens with under 10% cached), and totals per model. `cached_tokens` is server-side prefix reuse, not a client-reported number. The database starts at the 0.7.0 upgrade (2026-10-09).
+The report prints a daily summary, the largest cache-miss hours (at least 5K prompt tokens with under 10% cached), and totals per model. `cached_tokens` is server-side prefix reuse, not a client-reported number. The database starts at the 0.7.0 upgrade (2026-10-09); the 2026-10-19 validation probes are included in that day's rows.
 
 ### GDN sidecars and cache pruning
 
@@ -395,7 +395,7 @@ The 0.7.0 upgrade left pre-upgrade blocks and old TurboQuant/legacy blocks behin
 
 The 06:00 daily request is the vault log-digest job, a one-shot prompt that cannot reuse a prefix. The 2026-10-12 09:00 burst (three requests, 25.7K prompt tokens, 0 cached) and the 2026-10-16 23:00 burst (four requests, 16.8K prompt tokens, 0 cached) are background or agent jobs with distinct prompts. Multi-turn sessions do cache: 2026-10-11 13:00 reused 32,768 of 72,296 prompt tokens (45.3%).
 
-Client audit: Hermes requests usage and uses the thinking-off tool profile. Home Assistant requests usage and inserts its date/time note before the last user message, not at the front. Open WebUI's RAG template changes the prompt after the stable system block, so only the pre-context prefix can cache. No client-side timestamp change is needed.
+Client audit: Hermes requests usage and uses the thinking-off tool profile. Home Assistant requests usage; when its date/time injection is enabled, the note goes before the last user message, not at the front. Open WebUI's RAG template changes the prompt after the stable system block, so only the pre-context prefix can cache. No client-side timestamp change is needed.
 
 ### What this means
 
