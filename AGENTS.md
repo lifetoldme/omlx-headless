@@ -325,6 +325,60 @@ Behavior verified on this box:
 
 ---
 
+## Prefix cache and sidecar hygiene (2026-10-19)
+
+The primary is a hybrid model. oMLX persists prefix KV blocks on SSD under
+`~/.omlx/cache`, plus GDN state sidecars for the recurrent layers. The optional
+hot RAM tier is disabled (`cache.hot_cache_max_size: "0"`). A 1GB hot-cache test
+showed no TTFT gain (0.66 s vs 0.67 s on a 3.3K-token probe) and reduced free
+memory, so keep it off on 32GB.
+
+Validation: a 9,258-token prompt sent twice. First run 82.49 s with 0 cached;
+second 0.89 s with 9,251 cached. The log shows `Prefix cache restore ...
+cached=9251 suffix=7 blocks=5 reconstruct=10.671ms`. Cache only helps repeated
+prefixes; one-shot jobs pay full prefill.
+
+### GDN sidecar precision
+
+0.7.0 reads `cache.gdn_sidecar_precision`. The 0.6.x key
+`cache.gdn_sidecar_state_dtype` is ignored, and a missing new key resolves to
+`fp32`. This box records `"gdn_sidecar_precision": "fp32"` explicitly. Do not
+switch to `rht_int16` without a quality test; it was the 0.6.0 default, not an
+intentional choice.
+
+### Stale cache prune (2026-10-19)
+
+The 0.7.0 upgrade left pre-upgrade, TurboQuant, and legacy blocks in the cache.
+The service was stopped, 165 stale main blocks and the stale GDN sidecar dirs
+were moved to `~/.omlx/cache-pruned-20261019` (see `manifest.tsv`), and the live
+cache went from about 77 GB to 31 GB. The 132 current blocks and their sidecar
+dir were kept.
+
+Rollback: stop oMLX, move the quarantine contents back into `~/.omlx/cache`, and
+start. Delete the quarantine after a few days of healthy restores. Never prune
+while the service is running; the cache index is in memory.
+
+### Cache report
+
+`scripts/cache-report.sh [host] [days]` prints daily cache percentages,
+prefill/generation seconds, effective tok/s, and the largest cache-miss hours.
+The source is `~/.omlx/usage.sqlite3`, which starts at the 0.7.0 upgrade
+(2026-10-09). `cached_tokens` is server-side prefix reuse.
+
+### Client audit (2026-10-19)
+
+- Hermes: requests `include_usage`; the local primary is the thinking-off tool
+  profile.
+- Home Assistant: requests `include_usage`; its date/time note goes before the
+  last user message, not at the front of the prefix.
+- Open WebUI: the RAG template changes the prompt after the stable system block,
+  so only the pre-context prefix caches. Do not move RAG context ahead of the
+  user query.
+- The daily 06:00 0% request is the one-shot vault log-digest job, not a cache
+  regression.
+
+---
+
 ## Embedding memory cap (2026-09-17)
 
 `bge-m3` carries `max_context_window: 2048` in `~/.omlx/model_settings.json`
@@ -462,7 +516,9 @@ curl -s http://<MAC_STUDIO_IP>:8000/v1/models | python3 -m json.tool
 | oMLX venv Python | `$(brew --prefix)/opt/omlx/libexec/bin/python` (the actual listener) |
 | Model dir | `/opt/models/` |
 | oMLX settings | `~/.omlx/settings.json` |
+| oMLX usage DB | `~/.omlx/usage.sqlite3` |
+| Cache quarantine (2026-10-19) | `~/.omlx/cache-pruned-20261019` |
 | oMLX logs | `~/.omlx/logs/server.log`, `$(brew --prefix)/var/log/omlx.log` |
 | oMLX cache (optional SSD) | `~/.omlx/cache/` (if `--paged-ssd-cache-dir` enabled) |
 | Repo | `~/Developer/omlx-headless/` (or wherever cloned) |
-| Scripts | `scripts/install.sh`, `scripts/uninstall.sh`, `scripts/status.sh`, `scripts/update.sh` |
+| Scripts | `scripts/install.sh`, `scripts/uninstall.sh`, `scripts/status.sh`, `scripts/cache-report.sh`, `scripts/update.sh` |

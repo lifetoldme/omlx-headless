@@ -26,7 +26,7 @@ Clients (all on OTHER LAN hosts — nothing else runs on the Mac Studio):
 └── Hermes Agent            → http://<MAC_STUDIO_IP>:8000/v1
 ```
 
-oMLX exposes an OpenAI-compatible endpoint (`/v1/chat/completions`, `/v1/models`) with continuous batching and tiered KV caching (RAM hot tier + SSD cold tier) — far better than `mlx_lm.server` for concurrent HA + Hermes load on a single endpoint.
+oMLX exposes an OpenAI-compatible endpoint (`/v1/chat/completions`, `/v1/models`) with continuous batching and tiered KV caching (SSD cold tier plus a paged in-memory prefix cache; the optional hot RAM tier is disabled on this 32GB box) — far better than `mlx_lm.server` for concurrent HA + Hermes load on a single endpoint.
 
 ---
 
@@ -337,6 +337,7 @@ See **[AGENTS.md](AGENTS.md)** for the complete SSH-ops playbook. Key points:
 
 ```bash
 ./scripts/status.sh              # Health check
+./scripts/cache-report.sh        # Prefix-cache effectiveness (30 days)
 ./scripts/update.sh              # Update everything (oMLX + re-download model)
 ./scripts/update.sh --omlx       # Update oMLX via Homebrew only
 ./scripts/update.sh --models     # Re-download primary model only
@@ -357,6 +358,48 @@ Tail over SSH:
 ```bash
 ssh <user>@<MAC_STUDIO_IP> 'tail -f ~/.omlx/logs/server.log'
 ```
+
+---
+
+## Prefix cache health and observability (2026-10-19)
+
+oMLX persists prefix KV blocks on SSD (`~/.omlx/cache`). The optional hot RAM tier is disabled (`cache.hot_cache_max_size: "0"`). On this box the prefix restore is already fast (10.7 ms reconstruct for 9,251 tokens), and a 1GB hot-cache test showed no TTFT gain (0.66 s vs 0.67 s on a 3.3K-token probe), so it stays off.
+
+Validate the cache by sending the same prompt twice. A 9,258-token probe on 2026-10-19:
+
+| Run | TTFT | Cached tokens | Wall |
+|---|---:|---:|---:|
+| First | 82.5 s | 0 | 82.5 s |
+| Second | 0.84 s | 9,251 | 0.89 s |
+
+The log confirms the restore: `Prefix cache restore ... cached=9251 suffix=7 blocks=5 reconstruct=10.671ms`. Cache only helps repeated prefixes. One-shot requests, including the daily vault log-digest job and background summaries, will show 0% and pay the full prefill cost.
+
+### Usage report
+
+`~/.omlx/usage.sqlite3` records prompt, cached, prefill, generation, and wall seconds per model per hour. Run the report from any host that can SSH to the Mac:
+
+```bash
+./scripts/cache-report.sh                 # local-llm, 30 days
+./scripts/cache-report.sh local-llm 7     # 7 days
+```
+
+The report prints a daily summary, the largest cache-miss hours (at least 5K prompt tokens with under 10% cached), and totals per model. `cached_tokens` is server-side prefix reuse, not a client-reported number. The database starts at the 0.7.0 upgrade (2026-10-09).
+
+### GDN sidecars and cache pruning
+
+The hybrid Qwen3.8 model stores GDN state in `~/.omlx/cache/_gdn_sidecars`. oMLX 0.7.0 reads `cache.gdn_sidecar_precision`; the old 0.6.x key `gdn_sidecar_state_dtype` is ignored. This box records `"gdn_sidecar_precision": "fp32"` (the 0.7.0 default) explicitly.
+
+The 0.7.0 upgrade left pre-upgrade blocks and old TurboQuant/legacy blocks behind. On 2026-10-19 the service was stopped and 165 stale main blocks plus the stale GDN sidecar directories (about 49 GB) were moved to `~/.omlx/cache-pruned-20261019` with a `manifest.tsv`. The live cache dropped from about 77 GB to 31 GB; the 132 current blocks and their sidecar directory were kept. Delete the quarantine after a few days if cache restores stay healthy. Settings backups: `~/.omlx/*.bak-cache-20261019`.
+
+### Why some days show 0% cached
+
+The 06:00 daily request is the vault log-digest job, a one-shot prompt that cannot reuse a prefix. The 2026-10-12 09:00 burst (three requests, 25.7K prompt tokens, 0 cached) and the 2026-10-16 23:00 burst (four requests, 16.8K prompt tokens, 0 cached) are background or agent jobs with distinct prompts. Multi-turn sessions do cache: 2026-10-11 13:00 reused 32,768 of 72,296 prompt tokens (45.3%).
+
+Client audit: Hermes requests usage and uses the thinking-off tool profile. Home Assistant requests usage and inserts its date/time note before the last user message, not at the front. Open WebUI's RAG template changes the prompt after the stable system block, so only the pre-context prefix can cache. No client-side timestamp change is needed.
+
+### What this means
+
+Cache tuning will not make one-shot 9K prompts fast. Cold prefill on this M1 Max runs at about 112 tok/s, so 9K takes about 82 s and 25K takes about 4 minutes. Keep routine prompts small, reuse prefixes where the client allows it, and do not buy a faster Mac for this workload.
 
 ---
 
@@ -420,7 +463,7 @@ Then restart: `brew services restart omlx`.
 The 27B model at 4-bit (~16.9GB weights) plus KV cache plus macOS overhead sits near the 32GB ceiling under concurrent HA + Hermes load. Mitigations:
 
 - Memory guard is already raised to `custom` / 30 GB (see [Metal wired-memory limit](#metal-wired-memory-limit-prefill-guard-rejections)); lower it only if the box destabilizes
-- SSD KV cache is enabled (`~/.omlx/cache`, 46 GB cap)
+- SSD KV cache is enabled (`~/.omlx/cache`, auto-sized; about 31 GB live after the 2026-10-19 prune)
 - Max concurrent requests: 4
 - Drop to a smaller model if sustained swap is observed
 
@@ -562,5 +605,6 @@ omlx-headless/
     ├── install.sh      # One-shot setup: oMLX + model download + firewall
     ├── uninstall.sh    # Idempotent teardown of old + new stack
     ├── status.sh       # Health check
+    ├── cache-report.sh # Prefix-cache effectiveness from usage.sqlite3
     └── update.sh       # Update oMLX and/or re-download models
 ```
