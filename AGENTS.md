@@ -346,7 +346,7 @@ prefixes; one-shot jobs pay full prefill.
 switch to `rht_int16` without a quality test; it was the 0.6.0 default, not an
 intentional choice.
 
-### Stale cache prune (2026-10-19)
+### Stale cache prune (2026-10-19, quarantine deleted 2026-10-23)
 
 The 0.7.0 upgrade left pre-upgrade, TurboQuant, and legacy blocks in the cache.
 The service was stopped, 165 stale main blocks and the stale GDN sidecar dirs
@@ -354,9 +354,13 @@ were moved to `~/.omlx/cache-pruned-20261019` (see `manifest.tsv`), and the live
 cache went from about 77 GB to 31 GB. The 132 current blocks and their sidecar
 dir were kept.
 
-Rollback: stop oMLX, move the quarantine contents back into `~/.omlx/cache`, and
-start. Delete the quarantine after a few days of healthy restores. Never prune
-while the service is running; the cache index is in memory.
+Verified 2026-10-23: the service was up with all five model IDs, prefix restore
+reconstructed in ~19 ms, the live cache had rebuilt a fresh GDN sidecar dir, and
+there were no errors in `server.log`. The 46 GB quarantine was then deleted
+(free space 255 GB -> 300 GB). The pre-prune cache blocks are gone, so there is
+no rollback to them; the live cache is the only cache state. Settings backups at
+`~/.omlx/*.bak-cache-20261019` are untouched. Never prune the live cache while
+the service is running; the cache index is in memory.
 
 ### Cache report
 
@@ -518,7 +522,7 @@ curl -s http://<MAC_STUDIO_IP>:8000/v1/models | python3 -m json.tool
 | Model dir | `/opt/models/` |
 | oMLX settings | `~/.omlx/settings.json` |
 | oMLX usage DB | `~/.omlx/usage.sqlite3` |
-| Cache quarantine (2026-10-19) | `~/.omlx/cache-pruned-20261019` |
+| Cache quarantine (deleted 2026-10-23) | `~/.omlx/cache-pruned-20261019` (no longer present) |
 | oMLX logs | `~/.omlx/logs/server.log`, `$(brew --prefix)/var/log/omlx.log` |
 | oMLX cache (optional SSD) | `~/.omlx/cache/` (if `--paged-ssd-cache-dir` enabled) |
 | Repo | `~/Developer/omlx-headless/` (or wherever cloned) |

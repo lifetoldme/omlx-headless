@@ -389,7 +389,7 @@ The report prints a daily summary, the largest cache-miss hours (at least 5K pro
 
 The hybrid Qwen3.8 model stores GDN state in `~/.omlx/cache/_gdn_sidecars`. oMLX 0.7.0 reads `cache.gdn_sidecar_precision`; the old 0.6.x key `gdn_sidecar_state_dtype` is ignored. This box records `"gdn_sidecar_precision": "fp32"` (the 0.7.0 default) explicitly.
 
-The 0.7.0 upgrade left pre-upgrade blocks and old TurboQuant/legacy blocks behind. On 2026-10-19 the service was stopped and 165 stale main blocks plus the stale GDN sidecar directories (about 49 GB) were moved to `~/.omlx/cache-pruned-20261019` with a `manifest.tsv`. The live cache dropped from about 77 GB to 31 GB; the 132 current blocks and their sidecar directory were kept. Delete the quarantine after a few days if cache restores stay healthy. Settings backups: `~/.omlx/*.bak-cache-20261019`.
+The 0.7.0 upgrade left pre-upgrade blocks and old TurboQuant/legacy blocks behind. On 2026-10-19 the service was stopped and 165 stale main blocks plus the stale GDN sidecar directories (about 49 GB) were moved to `~/.omlx/cache-pruned-20261019` with a `manifest.tsv`. The live cache dropped from about 77 GB to 31 GB; the 132 current blocks and their sidecar directory were kept. After four days of healthy restores (service up, prefix reconstruct ~19 ms, fresh GDN sidecar dir, no errors) the 46 GB quarantine was deleted on 2026-10-23, taking free space from 255 GB to 300 GB. Settings backups remain at `~/.omlx/*.bak-cache-20261019`.
 
 ### Why some days show 0% cached
 
